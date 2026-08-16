@@ -6,6 +6,7 @@ Video laeuft, Zeile nachsprechen, am Ende laeuft die ganze Szene
 mit der eigenen Stimme. Keine GUI hier drin.
 """
 
+import io
 import os
 import re
 import glob
@@ -18,7 +19,7 @@ import numpy as np
 
 import dubforge_core as pc
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_DIR = pc.APP_DIR          # frozen-aware (neben der .exe bzw. dieser Datei)
 PACKS_DIR = os.path.join(APP_DIR, "packs")
 CACHE_DIR = os.path.join(tempfile.gettempdir(), "dubstage_cache")
 
@@ -41,6 +42,7 @@ class Line(object):
         self.index = index
         self.name = self._label()
         self.caption = ""       # Untertitel / subtitle
+        self.character = ""     # Figur / character (fuer Mehrspieler)
         self.audio = None       # Original-Sample / original sample
         self.duration = 0.0
         self.take = None        # Aufnahme des Spielers / player recording
@@ -64,6 +66,7 @@ class DubPack(object):
         self.video = None
         self.backing = None
         self.lines = []
+        self.characters = []    # geordnete Figurenliste / ordered characters
         self.frames = []
         self.fps = FRAME_FPS
         self.video_duration = 0.0
@@ -148,11 +151,31 @@ def load_pack(folder):
 
     known.sort(key=lambda e: e[1])
     captions = pc.read_captions(folder)
+    char_names, char_map = pc.read_characters(folder)
     for i, (f, ts) in enumerate(known):
         line = Line(os.path.join(folder, f), ts, i)
         line.caption = captions.get(f, "")
+        line.character = char_map.get(f, "")
         pack.lines.append(line)
+    # Geordnete Figurenliste: erst die aus der Datei, dann noch nicht
+    # genannte, wie sie in den Zeilen vorkommen.
+    ordered = [c for c in char_names]
+    for line in pack.lines:
+        if line.character and line.character not in ordered:
+            ordered.append(line.character)
+    pack.characters = ordered
     return pack
+
+
+def save_pack_characters(pack):
+    """Schreibt die aktuelle Figuren-Zuordnung des Packs als _characters.json.
+    Damit lassen sich auch bestehende Packs ohne Neubau taggen."""
+    mapping = {}
+    for line in pack.lines:
+        if getattr(line, "character", ""):
+            mapping[line.file] = line.character
+    ordered = getattr(pack, "characters", None)
+    return pc.write_characters(pack.folder, mapping, ordered)
 
 
 def find_packs(extra_dirs=None):
@@ -211,6 +234,36 @@ def write_wav_mono(path, data, sr=SR):
         w.setframerate(sr)
         w.writeframes(pcm)
     return path
+
+
+def wav_bytes(data, sr=SR):
+    """Kodiert ein Mono-Float-Array als 16-bit-PCM-WAV im Speicher (fuer den
+    Upload einzelner Takes an den Server)."""
+    data = np.clip(np.asarray(data, dtype=np.float32), -1.0, 1.0)
+    pcm = (data * 32767.0).astype("<i2").tobytes()
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+def take_from_wav_bytes(raw, sr=SR):
+    """Gegenstueck zu wav_bytes: WAV-Bytes -> Mono-Float-Array."""
+    got = _read_pcm_wav(io.BytesIO(raw))
+    if got is not None and got[1] == sr:
+        return got[0]
+    # Fremdes Format/Rate: ueber eine Temp-Datei mit ffmpeg lesen.
+    tmp = tempfile.mktemp(suffix=".wav")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(raw)
+        return read_wav_mono(tmp, sr)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def normalize(data, peak=0.97):
@@ -355,11 +408,16 @@ def slice_audio(data, start, duration, sr=SR):
     return out
 
 
-def render_dub(pack, sr=SR, duck=0.18, log=None):
+def render_dub(pack, sr=SR, duck=0.0, log=None):
     """
     Legt alle Aufnahmen an ihre Zeitstempel ueber den Backing Track.
-    Zeilen ohne Aufnahme behalten das Original - so wie es der
-    Dub-Guide fuer nicht gewaehlte Figuren beschreibt.
+
+    Wo eine Aufnahme liegt, wird die Original-Stimme der Figur an dieser
+    Stelle ersetzt, nicht nur leiser gezogen (duck=0.0 = vollstaendig
+    entfernen; ein Wert > 0 laesst das Original entsprechend leise stehen).
+    Ohne Backing Track fehlt dabei zwangslaeufig auch die Umgebung waehrend
+    der Zeile - mit getrenntem Backing Track (Demucs) bleibt die Musik.
+    Zeilen ohne Aufnahme behalten das Original.
     """
     total = max(pack.video_duration, 0.1)
     for line in pack.lines:
@@ -382,9 +440,21 @@ def render_dub(pack, sr=SR, duck=0.18, log=None):
         if line.take is not None and len(line.take):
             take = normalize(np.asarray(line.take, dtype=np.float32), 0.92)
             if not have_backing:
-                # Original an dieser Stelle leiser ziehen
+                # Original der Figur hier entfernen, damit die Aufnahme sie
+                # ersetzt statt sich nur drueberzulegen.
                 b = min(n, a + max(len(take), int(line.duration * sr)))
-                base[a:b] *= duck
+                if duck > 0.0:
+                    base[a:b] *= duck
+                else:
+                    base[a:b] = 0.0
+                    # kurze Ueberblendung an den Raendern gegen Knackser
+                    f = min(int(0.008 * sr), (b - a) // 2)
+                    if f > 0 and a - f >= 0:
+                        base[a - f:a] *= np.linspace(1.0, 0.0, f,
+                                                     dtype=np.float32)
+                    if f > 0 and b + f <= n:
+                        base[b:b + f] *= np.linspace(0.0, 1.0, f,
+                                                     dtype=np.float32)
             b = min(n, a + len(take))
             base[a:b] += take[:b - a]
         elif line.audio is not None and have_backing:
@@ -392,6 +462,90 @@ def render_dub(pack, sr=SR, duck=0.18, log=None):
             base[a:b] += line.audio[:b - a] * 0.9
 
     return normalize(base, 0.97)
+
+
+def _read_pcm_wav(path):
+    """Liest ein 16-bit-PCM-WAV mit der Standardbibliothek (ohne ffmpeg).
+    Rueckgabe (mono_float, samplerate) oder None, wenn nicht lesbar."""
+    with wave.open(path, "rb") as w:
+        if w.getsampwidth() != 2:
+            return None
+        ch = w.getnchannels()
+        fsr = w.getframerate()
+        raw = w.readframes(w.getnframes())
+    data = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    if ch > 1:
+        data = data.reshape(-1, ch).mean(axis=1)
+    return data, fsr
+
+
+def read_take(path, sr=SR):
+    """Laedt eine Aufnahme als Mono-Float. Erst die schnelle stdlib-Variante
+    fuer unsere eigenen PCM-WAVs, sonst ffmpeg fuer alles andere."""
+    try:
+        got = _read_pcm_wav(path)
+        if got is not None and got[1] == sr:
+            return got[0]
+    except Exception:
+        pass
+    return read_wav_mono(path, sr)
+
+
+# ==========================================================================
+#  Takes exportieren / importieren  (Mehrspieler-Grundlage)
+# ==========================================================================
+
+def export_takes(pack, out_dir, sr=SR):
+    """Schreibt jede aufgenommene Zeile als WAV nach out_dir, benannt nach
+    dem Clip-Dateinamen. Rueckgabe: Anzahl geschriebener Takes."""
+    os.makedirs(out_dir, exist_ok=True)
+    n = 0
+    for line in pack.lines:
+        take = getattr(line, "take", None)
+        if take is not None and len(take):
+            write_wav_mono(os.path.join(out_dir, line.file), take, sr)
+            n += 1
+    return n
+
+
+def import_takes(pack, in_dir, sr=SR, override=False):
+    """Laedt Takes aus in_dir in die passenden Zeilen (per Clip-Dateiname).
+    Bereits vorhandene Takes bleiben, sofern override=False. Rueckgabe:
+    Anzahl uebernommener Takes."""
+    if not os.path.isdir(in_dir):
+        return 0
+    n = 0
+    for line in pack.lines:
+        if line.take is not None and len(line.take) and not override:
+            continue
+        path = os.path.join(in_dir, line.file)
+        if os.path.isfile(path):
+            try:
+                line.take = read_take(path, sr)
+                n += 1
+            except Exception:
+                pass
+    return n
+
+
+def merge_take_dirs(pack, take_dirs, sr=SR, override=False):
+    """Fuehrt mehrere Take-Ordner (z. B. je Spieler) in den Pack zusammen.
+    Frueher genannte Ordner gewinnen, solange override=False."""
+    total = 0
+    for d in take_dirs:
+        total += import_takes(pack, d, sr=sr, override=override)
+    return total
+
+
+def assemble_from_take_dirs(pack, take_dirs, out_path, sr=SR, log=None,
+                            progress=None):
+    """Kompletter Zusammenbau aus mehreren Take-Ordnern: Audio laden, Takes
+    zusammenfuehren, Dub rendern und als Video schreiben. Genau der Weg, den
+    spaeter der Host mit den Takes vom Server geht."""
+    load_pack_audio(pack, sr, progress)
+    merge_take_dirs(pack, take_dirs, sr=sr)
+    mixed = render_dub(pack, sr=sr, log=log)
+    return export_dub_video(pack, mixed, out_path, sr=sr, log=log)
 
 
 def export_dub_video(pack, mixed_audio, out_path, sr=SR, log=None):
@@ -433,6 +587,9 @@ class Mic(object):
         self.sr = sr
         self.sd = audio_backend()
         self._stream = None
+        self._ostream = None            # eigener Ausgabestrom / output stream
+        self._odata = None
+        self._opos = 0
         self._chunks = []
         self._env = []                                  # Spitzenwerte je Fenster
         self._env_step = max(1, int(sr * ENV_MS / 1000.0))
@@ -482,10 +639,7 @@ class Mic(object):
         self._stream = self.sd.InputStream(**kwargs)
         self._stream.start()
         if playback is not None and len(playback):
-            try:
-                self.sd.play(np.asarray(playback, dtype=np.float32), self.sr)
-            except Exception:
-                pass
+            self._start_output(playback)
 
     def stop(self):
         if self._stream is not None:
@@ -495,11 +649,7 @@ class Mic(object):
             except Exception:
                 pass
             self._stream = None
-        try:
-            if self.sd:
-                self.sd.stop()
-        except Exception:
-            pass
+        self._stop_output()
         if not self._chunks:
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(self._chunks).astype(np.float32)
@@ -514,17 +664,51 @@ class Mic(object):
             return 0.0
         return float(min(1.0, max(self._env[-5:]) * 1.4))
 
+    def _start_output(self, data):
+        """Spielt ein Float-Array ueber einen eigenen OutputStream ab. Wir
+        umgehen damit sd.play()/sd.stop(): deren globaler Callback wirft beim
+        Beenden ein 'ignored exception' (fehlendes .out) in die Konsole."""
+        self._stop_output()
+        if not self.sd or data is None:
+            return
+        arr = np.asarray(data, dtype=np.float32).reshape(-1, 1)
+        if not len(arr):
+            return
+        self._odata = arr
+        self._opos = 0
+
+        def cb(outdata, frames, time_info, status):
+            i = self._opos
+            chunk = self._odata[i:i + frames]
+            k = len(chunk)
+            outdata[:k] = chunk
+            if k < frames:
+                outdata[k:] = 0
+                self._opos += k
+                raise self.sd.CallbackStop
+            self._opos += frames
+
+        try:
+            self._ostream = self.sd.OutputStream(
+                samplerate=self.sr, channels=1, dtype="float32", callback=cb)
+            self._ostream.start()
+        except Exception:
+            self._ostream = None
+
+    def _stop_output(self):
+        st = self._ostream
+        self._ostream = None
+        if st is not None:
+            try:
+                st.stop()
+                st.close()
+            except Exception:
+                pass
+
     def play(self, data):
         if not self.sd or data is None or not len(data):
             return
-        try:
-            self.sd.play(np.asarray(data, dtype=np.float32), self.sr)
-        except Exception:
-            pass
+        self._start_output(data)
 
     def stop_play(self):
-        try:
-            if self.sd:
-                self.sd.stop()
-        except Exception:
-            pass
+        self._stop_output()

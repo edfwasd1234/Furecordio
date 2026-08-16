@@ -11,7 +11,17 @@
 
 ---
 
-**DubForge** cuts a video into speakable clips, **DubStage** records your voice line by line and plays the whole scene back with it.
+**DubForge** cuts a video into speakable clips, **DubStage** records your voice line by line and plays the whole scene back with it. **DubMaker** is a newer, visual pack maker — drop in a video, mark each character's lines on the waveform, add subtitles, build.
+
+---
+
+## Online multiplayer
+
+Host a room, friends join with a short code, everyone dubs **their own characters** in parallel, and the host stitches it all together in scene order — Gartic-Phone style, up to **10 players**. It runs on a tiny standard-library relay server you can deploy **free in one click**:
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/edfwasd1234/Furecordio)
+
+After it deploys, Render gives you a `https://…onrender.com` URL — paste it into DubStage → **Play online → Server**. Full walkthrough in [`DEPLOY_SERVER.md`](DEPLOY_SERVER.md).
 
 ---
 

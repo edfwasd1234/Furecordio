@@ -46,7 +46,7 @@ CLIP_SEL = "#7c5cff"
 #  Sprache / language
 # ==========================================================================
 
-LANG = "de"
+LANG = "en"
 LANG_NAMES = {"de": "Deutsch", "en": "English"}
 
 
@@ -127,9 +127,13 @@ T = {
     "col_end":      ("Ende", "End"),
     "col_len":      ("Laenge", "Length"),
     "col_caption":  ("Untertitel", "Subtitle"),
+    "col_character": ("Figur", "Character"),
     "caption":      ("Untertitel:", "Subtitle:"),
     "caption_hint": ("Enter = speichern und zum naechsten Clip",
                      "Enter = save and go to the next clip"),
+    "character":    ("Figur:", "Character:"),
+    "character_hint": ("Wer spricht diese Zeile (fuer Mehrspieler)",
+                       "Who speaks this line (for multiplayer)"),
     "btn_play":     ("Anhoeren", "Play"),
     "btn_stop":     ("Stopp", "Stop"),
     "btn_rename":   ("Umbenennen", "Rename"),
@@ -307,7 +311,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.cfg = load_cfg()
-        set_lang(self.cfg.get("lang", "de"))
+        set_lang(self.cfg.get("lang", "en"))
 
         # Fensterhoehe an den Bildschirm anpassen - auf einem 1080p-Schirm
         # bleiben nach Taskleiste und Titelzeile keine 880 Pixel uebrig.
@@ -363,7 +367,7 @@ class App(tk.Tk):
     # -------------------------------------------------- Variablen (einmalig)
     def _init_vars(self):
         c = self.cfg
-        self.lang_var = tk.StringVar(value=LANG_NAMES.get(LANG, "Deutsch"))
+        self.lang_var = tk.StringVar(value=LANG_NAMES.get(LANG, "English"))
         self.src_mode = tk.StringVar(value=c.get("src_mode", "url"))
         self.url_var = tk.StringVar(value=c.get("last_url", ""))
         self.t_start = tk.StringVar(value=c.get("t_start", ""))
@@ -376,6 +380,7 @@ class App(tk.Tk):
         self.vheight = tk.StringVar(value=c.get("vheight", "720"))
         self.target_dir = tk.StringVar(value=c.get("target_dir", ""))
         self.caption_var = tk.StringVar(value="")
+        self.character_var = tk.StringVar(value="")
 
     # ------------------------------------------------------------------ UI
     def _build_style(self):
@@ -576,14 +581,17 @@ class App(tk.Tk):
         mid = ttk.Frame(step2)
         mid.pack(fill="both", expand=True, pady=(8, 0))
 
-        cols = ("nr", "name", "start", "end", "len", "caption")
+        cols = ("nr", "name", "start", "end", "len", "character", "caption")
         self.tree = ttk.Treeview(mid, columns=cols, show="headings", height=9)
-        for c, key, w in (("nr", "col_nr", 40), ("name", "col_name", 190),
+        for c, key, w in (("nr", "col_nr", 40), ("name", "col_name", 170),
                           ("start", "col_start", 85), ("end", "col_end", 85),
-                          ("len", "col_len", 70), ("caption", "col_caption", 320)):
+                          ("len", "col_len", 70),
+                          ("character", "col_character", 120),
+                          ("caption", "col_caption", 300)):
             self.tree.heading(c, text=t(key))
             self.tree.column(c, width=w,
-                             anchor="w" if c in ("name", "caption") else "center")
+                             anchor="w" if c in ("name", "caption",
+                                                 "character") else "center")
         self.tree.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
         sb.pack(side="left", fill="y")
@@ -617,6 +625,19 @@ class App(tk.Tk):
         self.caption_entry.bind("<Return>", self._caption_next)
         self.caption_entry.bind("<FocusOut>", lambda e: self._caption_save())
         ttk.Label(cap, text=t("caption_hint"),
+                  style="Dim.TLabel").pack(side="left")
+
+        chr_ = ttk.Frame(step2)
+        chr_.pack(fill="x", pady=(4, 0))
+        ttk.Label(chr_, text=t("character")).pack(side="left")
+        self.character_box = ttk.Combobox(chr_, textvariable=self.character_var,
+                                          width=22, values=())
+        self.character_box.pack(side="left", padx=6)
+        self.character_box.bind("<Return>", lambda e: self._character_save())
+        self.character_box.bind("<FocusOut>", lambda e: self._character_save())
+        self.character_box.bind("<<ComboboxSelected>>",
+                                lambda e: self._character_save())
+        ttk.Label(chr_, text=t("character_hint"),
                   style="Dim.TLabel").pack(side="left")
 
         # ---------------- Schritt 3: Bauen
@@ -1109,7 +1130,7 @@ class App(tk.Tk):
                                 max_clip=float(self.maxlen.get()),
                                 sensitivity=float(self.sens.get()))
         self.clips = [{"start": a, "end": b, "name": "clip%02d" % (i + 1),
-                       "caption": ""}
+                       "caption": "", "character": ""}
                       for i, (a, b) in enumerate(found)]
         self._log(t("log_found", len(self.clips)))
         self._set_status(t("st_done_an"), 100)
@@ -1128,7 +1149,7 @@ class App(tk.Tk):
                                 max_clip=float(self.maxlen.get()),
                                 sensitivity=float(self.sens.get()))
         self.clips = [{"start": a, "end": b, "name": "clip%02d" % (i + 1),
-                       "caption": ""}
+                       "caption": "", "character": ""}
                       for i, (a, b) in enumerate(found)]
         self.selected = 0 if self.clips else None
         self._log(t("log_redet", len(self.clips)))
@@ -1141,16 +1162,19 @@ class App(tk.Tk):
         for i, c in enumerate(self.clips):
             self.tree.insert("", "end", iid=str(i), values=(
                 i + 1, c["name"], "%.3f" % c["start"], "%.3f" % c["end"],
-                "%.2f" % (c["end"] - c["start"]), c.get("caption", "")))
+                "%.2f" % (c["end"] - c["start"]), c.get("character", ""),
+                c.get("caption", "")))
         if self.selected is not None and 0 <= self.selected < len(self.clips):
             self.tree.selection_set(str(self.selected))
             self.tree.see(str(self.selected))
+        self._refresh_char_values()
         self._load_caption()
 
     def _tree_select(self, _e=None):
         sel = self.tree.selection()
         if sel:
             self._caption_save()          # noch mit der vorherigen Auswahl
+            self._character_save()
             self.selected = int(sel[0])
             self._load_caption()
             self.draw_wave()
@@ -1163,6 +1187,7 @@ class App(tk.Tk):
         if self.selected is not None and 0 <= self.selected < len(self.clips):
             c = self.clips[self.selected]
         self.caption_var.set((c or {}).get("caption", ""))
+        self.character_var.set((c or {}).get("character", ""))
 
     def _caption_save(self):
         """Schreibt das Eingabefeld in den Clip, zu dem es geladen wurde."""
@@ -1179,6 +1204,7 @@ class App(tk.Tk):
 
     def _caption_next(self, _e=None):
         self._caption_save()
+        self._character_save()
         if self.selected is not None and self.selected < len(self.clips) - 1:
             nxt = str(self.selected + 1)
             self.tree.selection_set(nxt)
@@ -1186,6 +1212,33 @@ class App(tk.Tk):
             self.caption_entry.focus_set()
             self.caption_entry.selection_range(0, "end")
         return "break"
+
+    # -------------------------------------------------------------- Figur
+    def _character_save(self):
+        """Schreibt das Figur-Feld in den Clip, zu dem es geladen wurde."""
+        i = self._caption_for
+        if i is None or not (0 <= i < len(self.clips)):
+            return
+        new = self.character_var.get().strip()
+        if self.clips[i].get("character", "") != new:
+            self.clips[i]["character"] = new
+            try:
+                self.tree.set(str(i), "character", new)
+            except Exception:
+                pass
+            self._refresh_char_values()
+
+    def _refresh_char_values(self):
+        """Fuellt das Auswahlfeld mit den bisher vergebenen Figuren."""
+        seen = []
+        for c in self.clips:
+            name = (c.get("character") or "").strip()
+            if name and name not in seen:
+                seen.append(name)
+        try:
+            self.character_box["values"] = tuple(sorted(seen, key=str.lower))
+        except Exception:
+            pass
 
     def _rename_selected(self, _e=None):
         if self.selected is None:
@@ -1215,7 +1268,8 @@ class App(tk.Tk):
         if mid - c["start"] < 0.1 or c["end"] - mid < 0.1:
             return
         new = {"start": mid, "end": c["end"], "name": c["name"] + "_b",
-               "caption": c.get("caption", "")}
+               "caption": c.get("caption", ""),
+               "character": c.get("character", "")}
         c["end"] = mid
         self.clips.insert(self.selected + 1, new)
         self.refresh_list()
@@ -1422,6 +1476,7 @@ class App(tk.Tk):
             a, b = min(ref, tt), max(ref, tt)
             if b - a >= 0.15:
                 self.clips.append({"start": a, "end": b, "caption": "",
+                                   "character": "",
                                    "name": "clip%02d" % (len(self.clips) + 1)})
                 self.clips.sort(key=lambda c: c["start"])
                 self.selected = next(i for i, c in enumerate(self.clips)
@@ -1434,6 +1489,8 @@ class App(tk.Tk):
         if not self.clips:
             messagebox.showinfo(t("dlg_noclips_t"), t("dlg_noclips"))
             return
+        self._caption_save()              # noch offene Eingaben sichern
+        self._character_save()
         name = pc.safe_name(self.pack_name.get(), "Mein_Pack")
         self.pack_name.set(name)
         self._save_cfg()
@@ -1442,6 +1499,7 @@ class App(tk.Tk):
 
     def _do_build(self, name, clips):
         captions = {}
+        characters = {}
         os.makedirs(OUT_DIR, exist_ok=True)
         dest = os.path.join(OUT_DIR, name)
         if os.path.exists(dest):
@@ -1461,6 +1519,9 @@ class App(tk.Tk):
             cap = (c.get("caption") or "").strip()
             if cap:
                 captions[fn] = cap
+            chr_name = (c.get("character") or "").strip()
+            if chr_name:
+                characters[fn] = chr_name
             lines.append("%-44s %10.3f   %5.2fs%s"
                          % (fn, c["start"], c["end"] - c["start"],
                             "   | " + cap if cap else ""))
@@ -1470,6 +1531,10 @@ class App(tk.Tk):
         if captions:
             pc.write_captions(dest, captions)
             self._log("  %s (%d)" % (pc.CAPTION_FILE, len(captions)))
+
+        if characters:
+            pc.write_characters(dest, characters)
+            self._log("  %s (%d)" % (pc.CHARACTER_FILE, len(characters)))
 
         if dub and self.backing_path and os.path.isfile(self.backing_path):
             self._set_status(t("st_backing"), 68)

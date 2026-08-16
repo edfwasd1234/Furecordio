@@ -15,7 +15,16 @@ import subprocess
 import tempfile
 import wave
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+# APP_DIR: Ordner fuer beschreibbare Daten (packs, dubs, Einstellungen).
+# Als PyInstaller-Exe liegt er neben der .exe, sonst neben dieser Datei.
+# RES_DIR: Ordner mitgelieferter Ressourcen (z. B. ffmpeg) - im Exe-Bundle
+# ist das der entpackte _MEIPASS-Ordner.
+if getattr(sys, "frozen", False):
+    APP_DIR = os.path.dirname(sys.executable)
+    RES_DIR = getattr(sys, "_MEIPASS", APP_DIR)
+else:
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+    RES_DIR = APP_DIR
 TOOLS_DIR = os.path.join(APP_DIR, "tools")
 
 IS_WIN = os.name == "nt"
@@ -26,7 +35,7 @@ _NOWINDOW = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
 # Sprache / language
 # --------------------------------------------------------------------------
 
-LANG = "de"
+LANG = "en"
 
 
 def set_lang(code):
@@ -133,13 +142,17 @@ def _exe(name):
 
 
 def find_tool(name):
-    """Sucht erst im mitgelieferten tools/-Ordner, dann im System-PATH."""
-    local = os.path.join(TOOLS_DIR, _exe(name))
-    if os.path.isfile(local):
-        return local
-    for root, _dirs, files in os.walk(TOOLS_DIR):
-        if _exe(name) in files:
-            return os.path.join(root, _exe(name))
+    """Sucht erst im tools/-Ordner (neben der App und im Exe-Bundle), dann im
+    System-PATH."""
+    exe = _exe(name)
+    for base in (TOOLS_DIR, os.path.join(RES_DIR, "tools")):
+        local = os.path.join(base, exe)
+        if os.path.isfile(local):
+            return local
+        if os.path.isdir(base):
+            for root, _dirs, files in os.walk(base):
+                if exe in files:
+                    return os.path.join(root, exe)
     found = shutil.which(name)
     if found:
         return found
@@ -298,13 +311,21 @@ def check_encoders():
 # --------------------------------------------------------------------------
 
 def probe_duration(path):
-    out = capture([ffprobe(), "-v", "error", "-show_entries", "format=duration",
-                   "-of", "default=nw=1:nk=1", path]).strip().splitlines()
-    for line in out:
-        try:
-            return float(line.strip())
-        except ValueError:
-            continue
+    pp = find_tool("ffprobe")
+    if pp:
+        out = capture([pp, "-v", "error", "-show_entries", "format=duration",
+                       "-of", "default=nw=1:nk=1", path]).strip().splitlines()
+        for line in out:
+            try:
+                return float(line.strip())
+            except ValueError:
+                continue
+    # Rueckfallebene ohne ffprobe: Dauer aus der ffmpeg-Ausgabe lesen.
+    out = capture([ffmpeg(), "-hide_banner", "-i", path])
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", out)
+    if m:
+        h, mi, s = m.groups()
+        return int(h) * 3600 + int(mi) * 60 + float(s)
     return 0.0
 
 
@@ -764,6 +785,71 @@ def read_captions(folder):
     except Exception:
         pass
     return out
+
+
+CHARACTER_FILE = "_characters.json"
+
+
+def write_characters(folder, mapping, characters=None):
+    """
+    Schreibt die Figuren-Zuordnung als _characters.json in den Pack.
+    'mapping': {clip_filename: figur}. 'characters': optionale, geordnete
+    Liste aller Figuren (sonst aus dem mapping abgeleitet). Schluessel ist
+    der Dateiname des Clips - genau wie bei den Untertiteln.
+    """
+    clips = {}
+    for name, char in (mapping or {}).items():
+        char = (char or "").strip()
+        if char:
+            clips[name] = char
+    names = []
+    for c in (characters or []):
+        c = (c or "").strip()
+        if c and c not in names:
+            names.append(c)
+    for c in clips.values():
+        if c not in names:
+            names.append(c)
+    path = os.path.join(folder, CHARACTER_FILE)
+    if not clips and not names:
+        if os.path.exists(path):
+            os.remove(path)
+        return None
+    data = {"characters": names, "clips": clips}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    return path
+
+
+def read_characters(folder):
+    """
+    Liest _characters.json. Rueckgabe: (characters, clips) mit
+    characters = geordnete Liste aller Figuren und clips = {clip_filename:
+    figur}. Vertraegt auch das schlichte Format {clip_filename: figur}.
+    """
+    names, clips = [], {}
+    path = os.path.join(folder, CHARACTER_FILE)
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception:
+            raw = None
+        if isinstance(raw, dict) and "clips" in raw:
+            for k, v in (raw.get("clips") or {}).items():
+                if isinstance(v, str) and v.strip():
+                    clips[k] = v.strip()
+            for c in (raw.get("characters") or []):
+                if isinstance(c, str) and c.strip() and c.strip() not in names:
+                    names.append(c.strip())
+        elif isinstance(raw, dict):
+            for k, v in raw.items():
+                if isinstance(v, str) and v.strip():
+                    clips[k] = v.strip()
+    for c in clips.values():
+        if c not in names:
+            names.append(c)
+    return names, clips
 
 
 def clip_filename(index, label, start=None, dub=False):

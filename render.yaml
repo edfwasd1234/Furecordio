@@ -1,0 +1,22 @@
+# Render Blueprint for the DubStage relay server.
+# Deploy: push this repo to GitHub, then on render.com pick
+# "New +" -> "Blueprint" and point it at the repo. Render reads this file.
+#
+# The server is pure Python standard library (no pip packages), so the build
+# is a no-op and it starts in seconds. It honours Render's $PORT and binds
+# 0.0.0.0 already.
+services:
+  - type: web
+    name: dubstage-relay
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python dubstage_server.py"
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+      # Up to 10 players per room (change here if you want a different cap).
+      - key: DUBSTAGE_MAX_PLAYERS
+        value: "10"

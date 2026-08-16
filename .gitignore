@@ -2,10 +2,17 @@
 packs/
 dubs/
 tools/
+online_packs/
+
+# Build-Artefakte (PyInstaller) / build artifacts
+dist/
+build_pyi/
+build/
 
 # Einstellungen sind persoenlich / personal settings
 dubforge_settings.json
 dubstage_settings.json
+dubmaker_settings.json
 
 # nur fuer die Veroeffentlichung, gehoert nicht ins Projekt
 Push to GitHub.bat
