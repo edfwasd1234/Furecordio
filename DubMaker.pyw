@@ -98,6 +98,10 @@ T = {
                   "Drag on the waveform (with a character active) to make a region."),
     "pack_name": ("Pack-Name", "Pack name"),
     "backing":   ("Backing-Spur (Demucs)", "Backing track (Demucs)"),
+    "sep_run":   ("Trenne Stimme und Hintergrund (Demucs) ...",
+                  "Separating voice and background (Demucs) ..."),
+    "voice":     ("Stimme", "Voice"),
+    "background": ("Hintergrund", "Background"),
     "build":     ("Pack bauen", "Build pack"),
     "building":  ("Pack wird gebaut ...", "Building the pack ..."),
     "built":     ("Gebaut:\n%s", "Built:\n%s"),
@@ -271,6 +275,14 @@ class DubMaker(tk.Tk):
         self.pack_name = tk.StringVar(value=self.cfg.get("last_name", "MyScene"))
         self.backing_on = tk.BooleanVar(value=bool(self.cfg.get("backing", False)))
 
+        # Demucs-Trennung / vocal separation
+        self.blend_var = tk.DoubleVar(value=0.0)   # 0 = Stimme, 1 = Hintergrund
+        self._sep_done = False
+        self._sep_voc = None          # Pfad Vocals-WAV
+        self._sep_nov = None          # Pfad No-Vocals-WAV
+        self.voc_audio = None         # Vocals als Float (PSR)
+        self.nov_audio = None         # Hintergrund als Float (PSR)
+
         self.cv = tk.Canvas(self, bg=BG_BOT, highlightthickness=0)
         self.cv.pack(fill="both", expand=True)
         self.cv.bind("<Configure>", self._on_resize)
@@ -370,7 +382,8 @@ class DubMaker(tk.Tk):
                        font=("Segoe UI Semibold", 10))
         cv.create_window(w - 512, 76, window=name_e, anchor="w", width=170,
                          height=30)
-        chk = ttk.Checkbutton(self, text=t("backing"), variable=self.backing_on)
+        chk = ttk.Checkbutton(self, text=t("backing"), variable=self.backing_on,
+                              command=self._on_backing_toggle)
         self._embedded.append(chk)
         cv.create_window(w - 330, 76, window=chk, anchor="w")
         self._btn(w - pad - 150, 60, 150, 40, t("build"), self.build_pack, "go",
@@ -419,8 +432,21 @@ class DubMaker(tk.Tk):
                        text=t("regions_n", len(self.regions)), fill=DIM,
                        font=("Segoe UI", 10))
 
-        # Wellenform
-        wtop = ty + 52
+        # Stimme <-> Hintergrund Slider (nur wenn getrennt)
+        if self._sep_done:
+            sly = ty + 46
+            cv.create_text(rx0, sly, anchor="w", text="🔊 " + t("voice"),
+                           fill=TEAL, font=("Segoe UI Semibold", 10))
+            sc = ttk.Scale(self, from_=0.0, to=1.0, variable=self.blend_var,
+                           orient="horizontal")
+            self._embedded.append(sc)
+            cv.create_window(rx0 + 76, sly, window=sc, anchor="w",
+                             width=rw - 200, height=22)
+            cv.create_text(rx1, sly, anchor="e", text=t("background") + " 🎵",
+                           fill=ACC_HI, font=("Segoe UI Semibold", 10))
+            wtop = ty + 80
+        else:
+            wtop = ty + 52
         wh = 150
         self.wave_box = (rx0, wtop, rw, wh)
         round_rect(cv, rx0, wtop, rx1, wtop + wh, r=10, fill="#11141f",
@@ -563,7 +589,14 @@ class DubMaker(tk.Tk):
             self.view_a = 0.0
             self.view_b = self.duration
             self._imgcache = {}
+            # neue Quelle -> alte Trennung verwerfen
+            self._sep_done = False
+            self._sep_voc = self._sep_nov = None
+            self.voc_audio = self.nov_audio = None
             self.build_ui()
+            # War die Backing-Spur schon angehakt, gleich neu trennen.
+            if self.backing_on.get():
+                self.after(60, self._on_backing_toggle)
         self._run_bg(work, done)
 
     # ==================================================================
@@ -904,12 +937,52 @@ class DubMaker(tk.Tk):
         else:
             self.play_from(self.playhead)
 
+    # ------------------------------------------------ Demucs / Trennung
+    def _on_backing_toggle(self):
+        """Beim Anhaken sofort trennen (Demucs). Ergebnis wird gecacht, damit
+        Wiederanhaken und der Bau ohne erneute Trennung auskommen."""
+        if not self.backing_on.get():
+            self.build_ui()               # Slider ausblenden, Stems bleiben
+            return
+        if self.audio_path is None or self._busy:
+            return
+        if self._sep_done:
+            self.build_ui()               # schon getrennt -> nur Slider zeigen
+            return
+        self._busy = True
+        self._set_status(t("sep_run"))
+
+        def work():
+            voc, nov = pc.separate_vocals(self.audio_path, self.work)
+            self._n_voc, self._n_nov = voc, nov
+            self._n_voca = ds.read_wav_mono(voc, PSR)
+            self._n_nova = ds.read_wav_mono(nov, PSR)
+
+        def done():
+            self._busy = False
+            self._sep_voc, self._sep_nov = self._n_voc, self._n_nov
+            self.voc_audio, self.nov_audio = self._n_voca, self._n_nova
+            self._sep_done = True
+            self.build_ui()
+        self._run_bg(work, done)
+
+    def _preview_audio(self):
+        """Wiedergabe-Quelle: bei getrennter Spur eine Mischung aus Stimme und
+        Hintergrund je nach Slider (0 = Stimme, 1 = Hintergrund)."""
+        if self._sep_done and self.voc_audio is not None \
+                and self.nov_audio is not None:
+            s = float(self.blend_var.get())
+            n = min(len(self.voc_audio), len(self.nov_audio))
+            return self.voc_audio[:n] * (1.0 - s) + self.nov_audio[:n] * s
+        return self.play_audio
+
     def play_from(self, start):
-        if self.play_audio is None:
+        src = self._preview_audio()
+        if src is None:
             return
         start = max(0.0, min(self.duration - 0.02, start))
         a = int(start * PSR)
-        seg = self.play_audio[a:]
+        seg = src[a:]
         if not len(seg):
             return
         try:
@@ -928,7 +1001,7 @@ class DubMaker(tk.Tk):
         self.playhead = r["start"]
         a = int(r["start"] * PSR)
         b = int(r["end"] * PSR)
-        seg = self.play_audio[a:b]
+        seg = self._preview_audio()[a:b]
         if not len(seg):
             return
         try:
@@ -1034,13 +1107,16 @@ class DubMaker(tk.Tk):
         cut_source = self.audio_path
         backing = None
         if want_back:
-            try:
-                voc, nov = pc.separate_vocals(self.audio_path, self.work)
-                cut_source = voc
-                backing = nov
-            except Exception:
-                cut_source = self.audio_path
-                backing = None
+            if self._sep_done and self._sep_voc and self._sep_nov:
+                cut_source, backing = self._sep_voc, self._sep_nov   # gecacht
+            else:
+                try:
+                    voc, nov = pc.separate_vocals(self.audio_path, self.work)
+                    cut_source = voc
+                    backing = nov
+                except Exception:
+                    cut_source = self.audio_path
+                    backing = None
 
         captions, characters = {}, {}
         lines = ["# %s" % name]
@@ -1125,5 +1201,31 @@ class DubMaker(tk.Tk):
         self.destroy()
 
 
+def _selftest_demucs():
+    """Prueft im gebauten Exe, ob Demucs wirklich laeuft. Aktiviert ueber
+    die Umgebungsvariable DUBMAKER_SELFTEST=demucs; oeffnet keine GUI."""
+    import tempfile
+    result = os.path.join(APP_DIR, "selftest_demucs.txt")
+    try:
+        w = tempfile.mkdtemp(prefix="selftest_")
+        wav = os.path.join(w, "t.wav")
+        pc.run([pc.ffmpeg(), "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "sine=frequency=220:duration=3",
+                "-ac", "2", "-ar", "44100", wav])
+        voc, nov = pc.separate_vocals(wav, w)
+        ok = os.path.isfile(voc) and os.path.isfile(nov)
+        msg = "OK" if ok else "FAIL: output missing"
+    except Exception as e:
+        msg = "ERROR: %r" % e
+    try:
+        with open(result, "w", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    if os.environ.get("DUBMAKER_SELFTEST") == "demucs":
+        _selftest_demucs()
+        raise SystemExit(0)
     DubMaker().mainloop()

@@ -491,13 +491,36 @@ def extract_audio(video, out_wav, log=None):
 # Vocals trennen (Demucs)
 # --------------------------------------------------------------------------
 
+def _run_demucs(argv, log=None):
+    """Ruft Demucs auf. Bevorzugt in-process (demucs.separate.main), denn in
+    der gebauten .exe gibt es kein 'python -m demucs'. Faellt sonst auf einen
+    Subprozess zurueck (schlanke Installation ohne gebuendeltes Demucs)."""
+    import contextlib
+    try:
+        import demucs.separate as _dsep
+    except Exception:
+        run([sys.executable, "-m", "demucs"] + argv, log=log)
+        return
+    # In der Fenster-Exe koennen sys.stdout/err None sein -> Demucs/tqdm
+    # wuerden beim Schreiben abstuerzen. Sicher auf devnull umleiten.
+    with open(os.devnull, "w") as devnull:
+        out = sys.stdout if sys.stdout is not None else devnull
+        err = sys.stderr if sys.stderr is not None else devnull
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                _dsep.main(argv)
+            except SystemExit:
+                pass
+
+
 def separate_vocals(wav_path, workdir, log=None, model="htdemucs"):
     """Gibt (vocals_wav, no_vocals_wav) zurueck."""
     outdir = os.path.join(workdir, "demucs")
     os.makedirs(outdir, exist_ok=True)
-    cmd = [sys.executable, "-m", "demucs", "--two-stems", "vocals",
-           "-n", model, "-o", outdir, wav_path]
-    run(cmd, log=log)
+    if log:
+        log("Demucs: trenne Stimmen (kann etwas dauern) ...")
+    _run_demucs(["--two-stems", "vocals", "-n", model, "-o", outdir,
+                 wav_path], log=log)
     stem = os.path.splitext(os.path.basename(wav_path))[0]
     for root, _dirs, files in os.walk(outdir):
         if "vocals.wav" in files and os.path.basename(root) == stem:
