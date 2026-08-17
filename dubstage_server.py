@@ -40,8 +40,6 @@ MAX_PLAYERS = int(os.environ.get("DUBSTAGE_MAX_PLAYERS", "10"))      # inkl. Hos
 MAX_PACK = int(os.environ.get("DUBSTAGE_MAX_PACK", str(300 * 1024 * 1024)))
 MAX_TAKE = int(os.environ.get("DUBSTAGE_MAX_TAKE", str(25 * 1024 * 1024)))
 MAX_JSON = 2 * 1024 * 1024
-MAX_RESULT = 200 * 1024 * 1024
-PLAY_BUFFER = 5.0            # Vorlauf in s, damit alle synchron starten
 
 # Raumcode: gut vorlesbar, ohne leicht verwechselbare Zeichen.
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -66,9 +64,6 @@ class Room(object):
         self.dir = os.path.join(DATA_DIR, code)
         self.takes_dir = os.path.join(self.dir, "takes")
         self.pack_path = os.path.join(self.dir, "pack.zip")
-        self.result_path = os.path.join(self.dir, "result.wav")
-        self.play_start = None          # Server-Epoch, wann die Wiedergabe laeuft
-        self.play_seq = 0               # zaehlt jede neue "gemeinsam ansehen"-Runde
         os.makedirs(self.takes_dir, exist_ok=True)
         self.host_pid = self.add_player(host_name)[0]
 
@@ -130,10 +125,6 @@ class Room(object):
             "recorded_lines": len(recorded & set(self.line_files())),
             "unassigned_lines": len(unassigned),
             "has_pack": os.path.isfile(self.pack_path),
-            "server_time": time.time(),
-            "play_start": self.play_start,
-            "play_seq": self.play_seq,
-            "has_result": os.path.isfile(self.result_path),
         }
 
     def cleanup(self):
@@ -276,10 +267,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._download_takes(room)
             if sub == "takes" and len(parts) == 4 and method == "POST":
                 return self._upload_take(room, parts[3])
-            if sub == "result" and method == "POST":
-                return self._upload_result(room)
-            if sub == "result" and method == "GET":
-                return self._download_result(room)
             return self._err(404, "not found")
         except BrokenPipeError:
             pass
@@ -442,37 +429,6 @@ class Handler(BaseHTTPRequestHandler):
             room.touch()
         return self._send(200, {"ok": True, "clip": clip,
                                 "recorded_lines": len(room.takes)})
-
-    def _upload_result(self, room):
-        """Host laedt den fertigen Mix hoch und startet die gemeinsame
-        Wiedergabe. Alle Clients starten dann zum selben Zeitpunkt."""
-        if self._token_hdr() != room.host_token:
-            return self._err(403, "host only")
-        raw = self._body(MAX_RESULT)
-        if raw is None:
-            return self._err(413, "result too large")
-        if not raw[:4] == b"RIFF":
-            return self._err(400, "expected a wav")
-        with open(room.result_path, "wb") as f:
-            f.write(raw)
-        with LOCK:
-            room.play_seq += 1
-            room.play_start = time.time() + PLAY_BUFFER
-            room.phase = "playing"
-            room.touch()
-        return self._send(200, {"ok": True, "play_seq": room.play_seq,
-                                "play_start": room.play_start,
-                                "server_time": time.time()})
-
-    def _download_result(self, room):
-        who = self._requester_pid(room)
-        if who is None:
-            return self._err(403, "join the room first")
-        if not os.path.isfile(room.result_path):
-            return self._err(404, "no result yet")
-        with open(room.result_path, "rb") as f:
-            raw = f.read()
-        return self._send(200, raw=raw, ctype="audio/wav")
 
     def _download_takes(self, room):
         if self._token_hdr() != room.host_token:

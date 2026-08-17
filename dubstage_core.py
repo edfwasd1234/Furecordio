@@ -408,7 +408,100 @@ def slice_audio(data, start, duration, sr=SR):
     return out
 
 
-def render_dub(pack, sr=SR, duck=0.0, log=None):
+def _active_rms(x, sr=SR):
+    """Lautstaerke (RMS) nur der klingenden Teile - Stille zaehlt nicht."""
+    x = trim_silence(np.asarray(x, dtype=np.float32), sr)
+    if not len(x):
+        return 0.0
+    return float(np.sqrt(np.mean(x ** 2)))
+
+
+def _estimate_reverb(x, sr=SR):
+    """Schaetzt aus dem Original, wie hallig es klingt. Rueckgabe (wet, rt60):
+    wet 0..~0.4 = Nassanteil, rt60 = Nachhallzeit in Sekunden. Grob, aber in
+    die richtige Richtung: klingt eine Stimme lange aus, wird mehr Hall
+    angenommen (leerer Raum), bei trockener Sprache fast keiner."""
+    x = np.asarray(x, dtype=np.float32)
+    hop = max(1, int(sr * 0.02))
+    k = len(x) // hop
+    if k < 6:
+        return 0.0, 0.2
+    env = np.sqrt((x[:k * hop].reshape(k, hop) ** 2).mean(axis=1))
+    peak = float(env.max())
+    if peak < 1e-4:
+        return 0.0, 0.2
+    env = env / peak
+    decays = []
+    i = 0
+    while i < k:
+        if env[i] > 0.5:                      # Silbenspitze
+            j = i
+            while j < k and env[j] > 0.1:     # bis -20 dB abgeklungen
+                j += 1
+            decays.append((j - i) * 0.02)
+            i = max(j, i + 1)
+        else:
+            i += 1
+    if not decays:
+        return 0.0, 0.2
+    d = float(np.median(decays))
+    wet = float(np.clip((d - 0.22) / 0.5, 0.0, 0.4))
+    rt60 = float(np.clip(d * 1.5, 0.15, 0.6))
+    return wet, rt60
+
+
+def _fftconv(x, h):
+    """Schnelle Faltung ueber die FFT (ohne scipy)."""
+    n = len(x) + len(h) - 1
+    N = 1 << int(np.ceil(np.log2(max(1, n))))
+    y = np.fft.irfft(np.fft.rfft(x, N) * np.fft.rfft(h, N), N)[:n]
+    return y.astype(np.float32)
+
+
+def _reverb_ir(sr, rt60, predelay=0.008):
+    """Kunst-Raumantwort: exponentiell abklingendes Rauschen."""
+    n = max(1, int(rt60 * sr))
+    t = np.arange(n) / float(sr)
+    decay = np.exp(-6.9078 * t / max(0.05, rt60))       # -60 dB bei rt60
+    ir = (np.random.RandomState(0).randn(n).astype(np.float32) * decay)
+    pd = int(predelay * sr)
+    if pd:
+        ir = np.concatenate([np.zeros(pd, dtype=np.float32), ir])
+    return ir
+
+
+def _apply_reverb(take, sr, wet, rt60):
+    """Legt Hall auf die Aufnahme. Rueckgabe ist laenger (Nachhall-Fahne)."""
+    take = np.asarray(take, dtype=np.float32)
+    if wet <= 0.01 or not len(take):
+        return take
+    wetsig = _fftconv(take, _reverb_ir(sr, rt60))
+    out = np.zeros(len(wetsig), dtype=np.float32)
+    out[:len(take)] = take * (1.0 - wet)
+    rt = float(np.sqrt(np.mean(take ** 2)))
+    rw = float(np.sqrt(np.mean(wetsig ** 2))) if len(wetsig) else 0.0
+    scale = (rt / rw) if rw > 1e-6 else 0.0
+    out += (wet * scale) * wetsig
+    return out
+
+
+def match_take(take, original, sr=SR):
+    """Passt eine Aufnahme an das Original der Zeile an: gleiche Lautstaerke
+    (leise/weit weg bleibt leise) und aehnlicher Hall/Echo."""
+    take = np.asarray(take, dtype=np.float32)
+    original = np.asarray(original, dtype=np.float32)
+    if not len(take):
+        return take
+    ro = _active_rms(original, sr)
+    rt = _active_rms(take, sr)
+    if rt > 1e-5 and ro > 1e-6:
+        take = take * float(np.clip(ro / rt, 0.1, 4.0))
+    wet, rt60 = _estimate_reverb(original, sr)
+    take = _apply_reverb(take, sr, wet, rt60)
+    return np.clip(take, -1.0, 1.0)
+
+
+def render_dub(pack, sr=SR, duck=0.0, match=False, log=None):
     """
     Legt alle Aufnahmen an ihre Zeitstempel ueber den Backing Track.
 
@@ -438,7 +531,11 @@ def render_dub(pack, sr=SR, duck=0.0, log=None):
     for line in pack.lines:
         a = int(line.start * sr)
         if line.take is not None and len(line.take):
-            take = normalize(np.asarray(line.take, dtype=np.float32), 0.92)
+            if match and line.audio is not None and len(line.audio):
+                # An Original angleichen (Lautstaerke + Hall), NICHT normalisieren
+                take = match_take(line.take, line.audio, sr)
+            else:
+                take = normalize(np.asarray(line.take, dtype=np.float32), 0.92)
             if not have_backing:
                 # Original der Figur hier entfernen, damit die Aufnahme sie
                 # ersetzt statt sich nur drueberzulegen.

@@ -225,18 +225,6 @@ class Session(object):
                 names.append(name)
         return names
 
-    # -- Gemeinsame Wiedergabe / watch party -----------------------------
-    def upload_result(self, wav_bytes):
-        """Host: fertigen Mix hochladen und die synchrone Wiedergabe starten."""
-        return _request("POST", self._room("result"), data=wav_bytes,
-                        token=self.host_token, ctype="audio/wav", timeout=120)
-
-    def download_result(self):
-        """Den fertigen Mix als WAV-Bytes holen (fuer die Wiedergabe)."""
-        return _request("GET", self._room("result"),
-                        token=self.host_token or self.token,
-                        expect_json=False, timeout=120)
-
     def close_room(self):
         return _request("DELETE", self._room(), token=self.host_token)
 

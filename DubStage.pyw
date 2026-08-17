@@ -185,10 +185,8 @@ T = {
     "net_lost":   ("Server nicht erreichbar - erneuter Versuch ...",
                    "Server unreachable - retrying ..."),
     "leave_room_q": ("Raum verlassen?", "Leave the room?"),
-    "watch_title": ("Gemeinsam ansehen", "Watch party"),
-    "watch_wait": ("Gleich geht es los ...", "Starting shortly ..."),
-    "assembling2": ("Mix wird geteilt - alle sehen gleich zu ...",
-                    "Sharing the mix - everyone watches shortly ..."),
+    "match": ("Stimme ans Original angleichen (Lautstaerke + Hall)",
+              "Match original voice (volume + echo)"),
 
     # --- Update
     "upd_head":   ("Version %s ist da", "Version %s is out"),
@@ -375,9 +373,9 @@ class Game(tk.Tk):
         self.online_net = None        # dubstage_net.Session oder None
         self.online_role = None       # "host" | "player" | None
         self.online_mode = False      # gerade im Online-Aufnahmemodus?
-        self.online_watch = False     # gerade in der gemeinsamen Wiedergabe?
-        self._last_play_seq = 0       # zuletzt angesehene Wiedergabe-Runde
-        self._watch_offset = 0.0
+        # Dub an das Original angleichen (Lautstaerke + Hall)
+        self.match_var = tk.BooleanVar(
+            value=bool(self.cfg.get("match_acoustics", False)))
         self.lobby_state = {}         # letzter Serverzustand
         self.lobby_char_hits = []     # anklickbare Figur-Felder in der Lobby
         self._lobby_job = None
@@ -494,8 +492,7 @@ class Game(tk.Tk):
         elif self.screen == "stage":
             self.build_stage()
         elif self.screen == "finale":
-            if not self.online_watch:        # Watch-Party nicht neu aufbauen
-                self.build_finale()
+            self.build_finale()
         elif self.screen == "online":
             self.show_online()
         elif self.screen == "lobby":
@@ -558,7 +555,7 @@ class Game(tk.Tk):
     def _on_space(self):
         if self.screen == "stage" and self.phase == "idle":
             self.do_record()
-        elif self.screen == "finale" and not self.online_watch:
+        elif self.screen == "finale":
             self.toggle_finale_play()
 
     # ==================================================================
@@ -1603,7 +1600,7 @@ class Game(tk.Tk):
         self.screen = "finale"
         self._set_phase("idle")
         self._stop_audio()
-        self.mix = ds.render_dub(self.pack)
+        self.mix = ds.render_dub(self.pack, match=self.match_var.get())
         self._clear_canvas()
         self._backdrop()
         cv = self.cv
@@ -1658,10 +1655,31 @@ class Game(tk.Tk):
         self.b_save = self._btn(bx + bw + gapx, by, bw, bh, t("save"),
                                 self.export, "ghost",
                                 font=("Segoe UI Semibold", 12))
-        self.fin_msg = cv.create_text(w / 2, by + bh + 28, text="", fill=DIM,
+        self.fin_msg = cv.create_text(w / 2, by + bh + 26, text="", fill=DIM,
                                       font=("Segoe UI", 10))
+        mchk = ttk.Checkbutton(self, text=t("match"), variable=self.match_var,
+                               command=self._toggle_match)
+        self._embedded.append(mchk)
+        cv.create_window(w / 2, by + bh + 52, window=mchk, anchor="center")
         self.show_frame(0.0)
         self.after(350, self.toggle_finale_play)
+
+    def _toggle_match(self):
+        """Angleichen an/aus: Mix neu rendern und die Ansicht auffrischen."""
+        self.cfg["match_acoustics"] = bool(self.match_var.get())
+        save_cfg(self.cfg)
+        self._finale_stop()
+        self.cv.itemconfigure(self.fin_msg, text=t("saving"), fill=GOLD)
+        self.update_idletasks()
+
+        def work():
+            self._new_mix = ds.render_dub(self.pack, match=self.match_var.get())
+
+        def done():
+            self.mix = self._new_mix
+            if self.screen == "finale":
+                self.build_finale()
+        self._run_bg(work, done)
 
     def back_to_stage(self):
         self._stop_audio()
@@ -1934,7 +1952,6 @@ class Game(tk.Tk):
     def enter_lobby(self):
         self.screen = "lobby"
         self.online_mode = False
-        self.online_watch = False
         self._set_phase("idle")
         self._stop_audio()
         if self._lobby_job is not None:
@@ -2159,131 +2176,14 @@ class Game(tk.Tk):
                     shutil.rmtree(d, ignore_errors=True)
                 except Exception:
                     pass
-            # Fertigen Mix rendern und teilen -> alle sehen synchron zu.
-            self.mix = ds.render_dub(self.pack)
-            sess.upload_result(ds.wav_bytes(self.mix))
 
         def done():
-            self._lobby_note = t("assembling2")
+            self._lobby_note = ""
             self.online_mode = False
-            # Zurueck in die Lobby: der naechste Poll sieht phase=playing und
-            # startet die gemeinsame Wiedergabe - auch beim Host.
-            self.enter_lobby()
+            # Host baut die Szene lokal zusammen und kann sie per
+            # Bildschirmfreigabe zeigen.
+            self.build_finale()
         self._run_bg(work, done)
-
-    # -------------------------------------------------- gemeinsam ansehen
-    def start_watch(self, state):
-        """Holt den geteilten Mix und startet die synchrone Wiedergabe."""
-        if self.online_net is None or self.pack is None:
-            return
-        if self._lobby_job is not None:
-            try:
-                self.after_cancel(self._lobby_job)
-            except Exception:
-                pass
-            self._lobby_job = None
-        sess = self.online_net
-        try:
-            elapsed = float(state["server_time"]) - float(state["play_start"])
-        except Exception:
-            elapsed = 0.0
-
-        def work():
-            raw = sess.download_result()
-            self._watch_mix = ds.take_from_wav_bytes(raw, ds.SR)
-
-        def done():
-            self.mix = self._watch_mix
-            self.build_watch(elapsed)
-        self._run_bg(work, done)
-
-    def build_watch(self, elapsed):
-        self.screen = "finale"
-        self.online_watch = True
-        self._set_phase("idle")
-        self._stop_audio()
-        self._clear_canvas()
-        self._backdrop()
-        cv = self.cv
-        w, h = self.size()
-        pad = 34
-
-        self._btn(pad, 24, 170, 38, "‹  " + t("leave_room"),
-                  self.leave_online, "flat", font=("Segoe UI", 11))
-        cv.create_text(w / 2, 46, text=t("watch_title"), fill=TXT,
-                       font=("Segoe UI Black", 26))
-        cv.create_text(w / 2, 76, text=self.pack.name, fill=DIM,
-                       font=("Segoe UI", 11))
-
-        top = 104
-        vw, vh = self._video_size(w, h - top - 150, pad)
-        vx = (w - vw) / 2
-        self.video_box = (vx, top, vw, vh)
-        self._last_idx = None
-        round_rect(cv, vx - 8, top - 8, vx + vw + 8, top + vh + 8, r=18,
-                   fill="#05060a", outline=EDGE)
-        self.video_item = cv.create_image(vx + vw / 2, top + vh / 2,
-                                          anchor="center")
-        self.overlay_rect = round_rect(cv, vx, top, vx + vw, top + vh, r=12,
-                                       fill="#000000", stipple="gray50",
-                                       outline="", state="hidden")
-        self.overlay_text = cv.create_text(vx + vw / 2, top + vh / 2, text="",
-                                           fill=GOLD, state="hidden",
-                                           font=("Segoe UI Black", 40))
-        cy = top + vh + 18
-        self.fin_caption = cv.create_text(
-            vx + vw / 2, cy, anchor="n", text="", fill=GOLD,
-            font=("Segoe UI Semibold", 16), width=vw - 40, justify="center")
-        py = cy + 50
-        round_rect(cv, vx, py, vx + vw, py + 8, r=4, fill=PANEL_HI, outline="")
-        self.prog_item = cv.create_rectangle(vx, py, vx, py + 8, fill=ACC,
-                                             width=0)
-        self.prog_geo = (vx, py, vw)
-        self.fin_msg = cv.create_text(
-            w / 2, py + 34, fill=GOLD, font=("Segoe UI", 10),
-            text=t("watch_wait") if elapsed < 0 else "")
-
-        self.show_frame(max(0.0, elapsed))
-        if elapsed < 0:
-            self.after(int(-elapsed * 1000), lambda: self._watch_start(0.0))
-        else:
-            self._watch_start(elapsed)
-
-    def _watch_start(self, offset):
-        if self.screen != "finale" or self.mix is None or not len(self.mix):
-            return
-        dur = len(self.mix) / float(ds.SR)
-        offset = max(0.0, min(dur - 0.05, offset))
-        self._watch_offset = offset
-        self._set_phase("play", dur - offset)
-        try:
-            self.cv.itemconfigure(self.fin_msg, text="")
-        except Exception:
-            pass
-        self.mic.play(self.mix[int(offset * ds.SR):])
-        self._play_from(offset, dur - offset, self._watch_end)
-        self._watch_progress()
-
-    def _watch_progress(self):
-        if self.screen != "finale" or not self._play or not self.online_watch:
-            return
-        elapsed = time.perf_counter() - self._play["t0"]
-        pos = self._watch_offset + elapsed
-        total = max(0.01, len(self.mix) / float(ds.SR))
-        vx, py, vw = self.prog_geo
-        try:
-            self.cv.coords(self.prog_item, vx, py, vx + vw * min(1.0, pos / total),
-                           py + 8)
-            self.cv.itemconfigure(self.fin_caption, text=self._caption_at(pos))
-        except Exception:
-            traceback.print_exc()
-        self.after(80, self._watch_progress)
-
-    def _watch_end(self):
-        self._set_phase("idle")
-        self._stop_audio()
-        self.online_watch = False
-        self.enter_lobby()
 
     def _upload_take(self, clip, data):
         sess = self.online_net
@@ -2312,7 +2212,6 @@ class Game(tk.Tk):
         self.online_net = None
         self.online_role = None
         self.online_mode = False
-        self.online_watch = False
         self.lobby_state = {}
         self._lobby_note = ""
         self._lobby_neterr = None
@@ -2351,13 +2250,6 @@ class Game(tk.Tk):
                     if not payload.get("_error"):
                         self.lobby_state = payload
                         self._lobby_neterr = None
-                        # Host hat den Mix geteilt -> gemeinsam ansehen
-                        if (payload.get("phase") == "playing"
-                                and payload.get("play_seq", 0) > self._last_play_seq
-                                and payload.get("has_result")
-                                and self.online_net is not None):
-                            self._last_play_seq = payload["play_seq"]
-                            self.start_watch(payload)
                     else:
                         self._lobby_neterr = payload.get("_error")
                     if self.screen == "lobby":
