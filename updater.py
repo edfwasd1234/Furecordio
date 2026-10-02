@@ -43,8 +43,13 @@ RELEASES_PAGE = "https://github.com/%s/releases" % REPO
 UA = "DubStage-Updater/%s (+https://github.com/%s)" % (VERSION, REPO)
 
 TIMEOUT = 12                       # Sekunden pro Anfrage
-MAX_ZIP = 80 * 1024 * 1024         # 80 MB - das Projekt liegt weit darunter
+MAX_ZIP = 80 * 1024 * 1024         # 80 MB - der Quelltext liegt weit darunter
+MAX_ASSET = 800 * 1024 * 1024      # fertige Build-Zips (Exe) sind groesser
 CHECK_EVERY = 6 * 3600             # hoechstens alle 6 Stunden nachfragen
+
+# Name des fertigen Build-Archivs als Release-Anhang (fuer die Exe-Version,
+# die sich nicht aus dem Quelltext tauschen kann).
+PACKAGED_ASSET_HINT = "dubsuite"
 
 # Nur diese Hosts liefern bei GitHub Releases aus.
 ALLOWED_HOSTS = ("api.github.com", "github.com", "codeload.github.com",
@@ -137,6 +142,26 @@ def check_latest():
         raise UpdateError("Kein Release gefunden.")
 
     zip_url = d.get("zipball_url") or ""
+
+    # Fertiges Build-Archiv als Anhang finden (fuer die Exe-Selbstaktualisierung).
+    asset_url = asset_name = ""
+    asset_size = 0
+    assets = d.get("assets") or []
+    zips = [a for a in assets
+            if str(a.get("name", "")).lower().endswith(".zip")
+            and a.get("browser_download_url")]
+    pick = None
+    for a in zips:                          # bevorzugt das DubSuite-Build
+        if PACKAGED_ASSET_HINT in str(a.get("name", "")).lower():
+            pick = a
+            break
+    if pick is None and zips:
+        pick = zips[0]
+    if pick and _trusted(pick["browser_download_url"]):
+        asset_url = pick["browser_download_url"]
+        asset_name = pick.get("name", "")
+        asset_size = int(pick.get("size") or 0)
+
     return {
         "tag": tag,
         "version": tag.lstrip("vV"),
@@ -144,12 +169,15 @@ def check_latest():
         "notes": (d.get("body") or "").strip(),
         "page": d.get("html_url") or RELEASES_PAGE,
         "zip": zip_url if _trusted(zip_url) else "",
+        "asset": asset_url,
+        "asset_name": asset_name,
+        "asset_size": asset_size,
         "published": (d.get("published_at") or "")[:10],
         "newer": is_newer(tag),
     }
 
 
-def download_zip(url, dest, progress=None):
+def download_zip(url, dest, progress=None, max_bytes=MAX_ZIP):
     """Archiv laden. progress(geladen, gesamt_oder_None)."""
     if not _trusted(url):
         raise UpdateError("Nicht vertrauenswuerdige Adresse: %s" % url)
@@ -157,16 +185,16 @@ def download_zip(url, dest, progress=None):
     with _open(url) as r:
         total = r.headers.get("Content-Length")
         total = int(total) if (total or "").isdigit() else None
-        if total and total > MAX_ZIP:
+        if total and total > max_bytes:
             raise UpdateError("Archiv ist zu gross (%d MB)."
                               % (total // (1024 * 1024)))
         with open(dest, "wb") as f:
             while True:
-                chunk = r.read(64 * 1024)
+                chunk = r.read(256 * 1024)
                 if not chunk:
                     break
                 done += len(chunk)
-                if done > MAX_ZIP:
+                if done > max_bytes:
                     raise UpdateError("Archiv ist zu gross.")
                 f.write(chunk)
                 if progress:
@@ -357,6 +385,114 @@ def apply(staged_root, app_dir, which="DubForge", tag=""):
     bat = os.path.join(tmp, "dubstage_update_%s.bat" % stamp)
 
     text = swap_text(staged_root, app_dir, bak, log, which, tag, os.getpid())
+
+    with io.open(bat, "w", encoding="cp1252", errors="replace",
+                 newline="\r\n") as f:
+        f.write(text)
+
+    flags = 0x00000008 | 0x00000200          # DETACHED | NEW_PROCESS_GROUP
+    subprocess.Popen([os.environ.get("COMSPEC", "cmd.exe"), "/c", bat],
+                     cwd=tmp, close_fds=True, creationflags=flags)
+    return log
+
+
+# ==========================================================================
+#  Tausch der fertigen Exe-Version (onedir-Build)
+# ==========================================================================
+# Die laufende .exe und ihre DLLs sind gesperrt, solange die App laeuft. Der
+# Helfer wartet darum erst, bis der Prozess (PID) weg ist, und tauscht dann die
+# Programmdateien aus. Benutzerdaten (packs/dubs/tools/online_packs/settings)
+# bleiben unberuehrt, weil sie im Build-Archiv gar nicht vorkommen und robocopy
+# ohne /MIR nichts loescht. Nur der reine Programmordner _internal wird
+# gespiegelt (dort liegen keine Benutzerdaten).
+
+PACK_SWAP = r"""@echo off
+setlocal
+set "SRC=__SRC__"
+set "DST=__DST__"
+set "LOG=__LOG__"
+set "STAGE=__STAGE__"
+
+echo ---- Update __TAG__  %DATE% %TIME% > "%LOG%"
+echo Quelle : %SRC% >> "%LOG%"
+echo Ziel   : %DST% >> "%LOG%"
+
+rem Warten, bis die App (PID) wirklich beendet ist (hoechstens ~60 s).
+set /a N=0
+:wait
+tasklist /fi "PID eq __PID__" 2>nul | find "__PID__" >nul
+if errorlevel 1 goto :swap
+set /a N+=1
+if %N% GEQ 120 goto :giveup
+ping -n 2 127.0.0.1 >nul
+goto :wait
+
+:swap
+rem Programmressourcen spiegeln (enthalten keine Benutzerdaten).
+robocopy "%SRC%\_internal" "%DST%\_internal" /MIR /R:30 /W:1 /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1
+rem Die beiden Programme tauschen (robocopy wiederholt gesperrte Dateien).
+robocopy "%SRC%" "%DST%" DubStage.exe DubMaker.exe /R:30 /W:1 /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1
+echo Update eingespielt. >> "%LOG%"
+goto :starten
+
+:giveup
+echo App lief noch - Update abgebrochen. >> "%LOG%"
+goto :cleanup
+
+:starten
+start "" "%DST%\DubStage.exe"
+
+:cleanup
+rmdir /s /q "%STAGE%" 2>nul
+endlocal
+(goto) 2>nul & del "%~f0"
+"""
+
+
+def stage_packaged(zip_path, workdir):
+    """Entpackt ein fertiges Build-Archiv und gibt den Ordner zurueck, der
+    DubStage.exe enthaelt. Prueft gegen Pfad-Ausbruch."""
+    with zipfile.ZipFile(zip_path) as z:
+        for n in z.namelist():
+            if not _safe_member(n):
+                raise UpdateError("Archiv enthaelt einen unzulaessigen Pfad: %s"
+                                  % n)
+        z.extractall(workdir)
+
+    # Das Build-Archiv enthaelt einen Ordner (z. B. "DubSuite").
+    root = workdir
+    if not os.path.isfile(os.path.join(root, "DubStage.exe")):
+        for e in os.listdir(workdir):
+            cand = os.path.join(workdir, e)
+            if os.path.isdir(cand) and os.path.isfile(
+                    os.path.join(cand, "DubStage.exe")):
+                root = cand
+                break
+    if not os.path.isfile(os.path.join(root, "DubStage.exe")):
+        raise UpdateError("Build-Archiv passt nicht: DubStage.exe fehlt.")
+    if not os.path.isdir(os.path.join(root, "_internal")):
+        raise UpdateError("Build-Archiv passt nicht: _internal fehlt.")
+    return root
+
+
+def apply_packaged(staged_root, app_dir, tag="", stage_dir=None):
+    """Tauschskript fuer die Exe-Version schreiben und starten. Die App muss
+    sich danach beenden, damit die Dateien frei werden."""
+    if os.name != "nt":
+        raise UpdateError("Der automatische Tausch ist nur unter Windows "
+                          "vorgesehen.")
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    tmp = tempfile.gettempdir()
+    log = os.path.join(tmp, "dubstage_update_%s.log" % stamp)
+    bat = os.path.join(tmp, "dubstage_update_%s.bat" % stamp)
+
+    text = (PACK_SWAP
+            .replace("__SRC__", staged_root.rstrip("\\/"))
+            .replace("__DST__", app_dir.rstrip("\\/"))
+            .replace("__LOG__", log)
+            .replace("__STAGE__", (stage_dir or staged_root).rstrip("\\/"))
+            .replace("__TAG__", tag or "?")
+            .replace("__PID__", str(os.getpid())))
 
     with io.open(bat, "w", encoding="cp1252", errors="replace",
                  newline="\r\n") as f:

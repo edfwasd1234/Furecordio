@@ -24,9 +24,13 @@ versioning follows [Semantic Versioning](https://semver.org/).
   while the tunnel's DNS propagates, instead of failing on the first attempt.
 - **Shared updates in a room.** Everyone's app version is shared in the lobby,
   and anyone running an older version than the newest person in the room sees an
-  **Update** button. From source it runs the normal in-app update (download,
-  verify, swap, restart); from the packaged build it opens the releases page to
-  grab the new zip. The auto-updater now points at this project's own repository.
+  **Update** button that updates in place with no extra steps. The auto-updater
+  now points at this project's own repository.
+- **The packaged (.exe) build now updates itself.** It downloads the new build
+  archive attached to the GitHub release, and a helper waits for the app to
+  close, swaps the programs and `_internal/` folder, and relaunches — your
+  `packs/`, `dubs/`, `tools/` and settings are left untouched. If a release has
+  no build archive attached, it falls back to opening the releases page.
 - Online assembly reports what it gathered and warns instead of silently
   building a dub-less video; failed take uploads are surfaced in the lobby.
 

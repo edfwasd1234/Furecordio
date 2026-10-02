@@ -811,8 +811,8 @@ class Game(tk.Tk):
         return bh + 16
 
     def _check_update(self):
-        if getattr(sys, "frozen", False):
-            return                       # Exe-Build aktualisiert sich nicht selbst
+        # Auch die Exe-Version aktualisiert sich jetzt selbst (ueber das
+        # fertige Build-Archiv als Release-Anhang), darum kein frueher Ausstieg.
         cache = self.cfg.get("upd_cache") or {}
         if cache.get("tag") and upd.is_newer(cache["tag"]):
             self.upd_info = cache
@@ -850,7 +850,14 @@ class Game(tk.Tk):
         info = self.upd_info
         if not info or self.upd_busy:
             return
-        if not info.get("zip"):
+        frozen = getattr(sys, "frozen", False)
+        if frozen and not info.get("asset"):
+            # Kein fertiges Build am Release -> Seite oeffnen, von Hand laden.
+            messagebox.showinfo(t("title"),
+                                t("update_exe", info.get("version", "?")))
+            webbrowser.open(info.get("page") or upd.RELEASES_PAGE)
+            return
+        if not frozen and not info.get("zip"):
             webbrowser.open(info.get("page") or upd.RELEASES_PAGE)
             return
         if not messagebox.askyesno(t("upd_ask_t"),
@@ -864,18 +871,29 @@ class Game(tk.Tk):
         def work():
             wd = tempfile.mkdtemp(prefix="dubstage_upd_")
             try:
-                zp = os.path.join(wd, "release.zip")
-
                 def prog(done, total):
                     pct = int(done * 100 / total) if total else 0
                     self.msgq.put(("upd_say", t("upd_dl", pct)))
 
-                upd.download_zip(info["zip"], zp, progress=prog)
-                self.msgq.put(("upd_say", t("upd_check")))
-                root = upd.stage(zp, os.path.join(wd, "neu"))
-                self.msgq.put(("upd_say", t("upd_swap")))
-                upd.apply(root, APP_DIR, which="DubStage",
-                          tag=info.get("tag", ""))
+                if frozen:
+                    # Fertiges Build-Archiv laden, entpacken und per Helfer
+                    # tauschen (die laufende Exe kann sich nicht selbst ersetzen).
+                    zp = os.path.join(wd, "build.zip")
+                    upd.download_zip(info["asset"], zp, progress=prog,
+                                     max_bytes=upd.MAX_ASSET)
+                    self.msgq.put(("upd_say", t("upd_check")))
+                    root = upd.stage_packaged(zp, os.path.join(wd, "neu"))
+                    self.msgq.put(("upd_say", t("upd_swap")))
+                    upd.apply_packaged(root, APP_DIR,
+                                       tag=info.get("tag", ""), stage_dir=wd)
+                else:
+                    zp = os.path.join(wd, "release.zip")
+                    upd.download_zip(info["zip"], zp, progress=prog)
+                    self.msgq.put(("upd_say", t("upd_check")))
+                    root = upd.stage(zp, os.path.join(wd, "neu"))
+                    self.msgq.put(("upd_say", t("upd_swap")))
+                    upd.apply(root, APP_DIR, which="DubStage",
+                              tag=info.get("tag", ""))
                 self.msgq.put(("upd_quit", None))
             except Exception as e:
                 self.msgq.put(("upd_error", "%s" % e))
@@ -2441,16 +2459,9 @@ class Game(tk.Tk):
         newer = self._lobby_update_offer()
         if not newer:
             return
-        if getattr(sys, "frozen", False):
-            # Die fertige Exe kann sich nicht selbst tauschen -> Download-Seite.
-            messagebox.showinfo(t("title"), t("update_exe", newer))
-            try:
-                webbrowser.open(upd.RELEASES_PAGE)
-            except Exception:
-                pass
-            return
-        # Quelltext-Version: neuestes Release holen und ueber den vorhandenen
-        # Update-Weg einspielen (Download -> pruefen -> tauschen -> Neustart).
+        # Neuestes Release holen und ueber den vorhandenen Update-Weg einspielen
+        # (Exe: fertiges Build tauschen; Quelltext: Dateien tauschen; danach
+        # Neustart). Alles ohne weitere Schritte fuer den Nutzer.
         self._lobby_note = t("update_checking")
         self.build_lobby()
 
