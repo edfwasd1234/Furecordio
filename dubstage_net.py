@@ -14,6 +14,7 @@ Ablauf:
   Host:    c.pull_takes(dest_dir)           -> alle Takes fuer den Zusammenbau
 """
 
+import base64
 import io
 import json
 import os
@@ -24,6 +25,35 @@ import urllib.request
 
 TIMEOUT = 30
 UA = "DubStage-Client"
+
+# Einladungscode: ein einziger String, der Serveradresse UND Raumcode traegt.
+# So muss ein Mitspieler nur eine Sache einfuegen -- keine Serveradresse tippen.
+INVITE_PREFIX = "DUB1"
+
+
+def make_invite(base_url, code):
+    """Baut einen Einladungscode aus oeffentlicher Adresse + Raumcode."""
+    raw = ((base_url or "").rstrip("/") + "|" + (code or "")).encode("utf-8")
+    body = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return INVITE_PREFIX + body
+
+
+def parse_invite(text):
+    """Zerlegt einen Einladungscode -> (base_url, code) oder None, wenn der
+    Text kein Einladungscode ist (dann ist es wohl ein blanker Raumcode)."""
+    t = (text or "").strip()
+    if len(t) <= len(INVITE_PREFIX) or t[:len(INVITE_PREFIX)].upper() != INVITE_PREFIX:
+        return None
+    body = t[len(INVITE_PREFIX):]
+    body += "=" * (-len(body) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(body.encode("ascii")).decode("utf-8")
+        url, code = raw.rsplit("|", 1)
+        if not url or not code:
+            return None
+        return url, code.upper()
+    except Exception:
+        return None
 
 _SSL = ssl.create_default_context()
 

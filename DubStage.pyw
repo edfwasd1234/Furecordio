@@ -25,6 +25,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dubforge_core as pc
 import dubstage_core as ds
 import dubstage_net as net
+import dubstage_server as srv
+import dubstage_tunnel as tun
 import updater as upd
 
 APP_DIR = pc.APP_DIR          # frozen-aware (neben der .exe bzw. dieser Datei)
@@ -141,30 +143,55 @@ T = {
     # --- Online / Mehrspieler
     "online":     ("Online spielen", "Play online"),
     "online_head": ("Zusammen nachsprechen", "Dub together"),
-    "online_sub": ("Ein Host oeffnet einen Raum, die anderen treten mit dem "
-                   "Code bei. Jeder spricht seine Figuren, am Ende baut der "
-                   "Host alles zusammen.",
-                   "A host opens a room, the others join with the code. "
-                   "Everyone dubs their characters, then the host assembles "
-                   "it all."),
+    "online_sub": ("Hoste direkt auf deinem Rechner - die anderen treten mit "
+                   "einem Einladungscode bei. Jeder spricht seine Figuren, am "
+                   "Ende baut der Host alles zusammen.",
+                   "Host right from your own machine - the others join with "
+                   "one invite code. Everyone dubs their characters, then the "
+                   "host assembles it all."),
     "srv":        ("Server", "Server"),
     "your_name":  ("Dein Name", "Your name"),
     "host_head":  ("Als Host starten", "Start as host"),
     "host_pack_is": ("Pack: %s", "Pack: %s"),
+    "host_mine":  ("Auf meinem Rechner hosten", "Host on my machine"),
+    "host_mine_hint": ("Keine Einrichtung, keine Portfreigabe. DubStage oeffnet "
+                       "dafuer kurz eine sichere Internet-Verbindung.",
+                       "No setup, no port-forwarding. DubStage briefly opens a "
+                       "secure internet link for this."),
     "open_room":  ("Raum eroeffnen", "Open room"),
+    "adv_srv":    ("Stattdessen eigenen/gemieteten Server nutzen",
+                   "Use my own / a hosted server instead"),
+    "adv_hide":   ("Eigenen Server ausblenden", "Hide server option"),
     "join_head":  ("Einem Raum beitreten", "Join a room"),
     "room_code":  ("Raumcode", "Room code"),
+    "invite_or_code": ("Einladungscode", "Invite code"),
+    "invite_hint": ("Fuege den Code ein, den der Host dir geschickt hat.",
+                    "Paste the code the host sent you."),
     "join_btn":   ("Beitreten", "Join"),
     "no_sel_pack": ("Erst im Menue einen Pack waehlen.",
                     "Pick a pack in the menu first."),
     "need_srv":   ("Bitte eine Serveradresse eintragen.",
                    "Please enter a server address."),
-    "need_code":  ("Bitte einen Raumcode eintragen.",
-                   "Please enter a room code."),
+    "need_code":  ("Bitte einen Einladungscode oder Raumcode eintragen.",
+                   "Please enter an invite code or a room code."),
     "connecting": ("Verbinde ...", "Connecting ..."),
     "uploading":  ("Pack wird hochgeladen ...", "Uploading the pack ..."),
     "downloading": ("Pack wird geladen ...", "Downloading the pack ..."),
+    "tun_prep":   ("Mein Rechner wird als Host vorbereitet ...",
+                   "Getting your machine ready to host ..."),
+    "tun_dl":     ("Verbindungs-Helfer wird geladen ... %d%%",
+                   "Downloading the connection helper ... %d%%"),
+    "tun_start":  ("Sichere Internet-Verbindung wird geoeffnet ...",
+                   "Opening a secure internet link ..."),
+    "tun_verify": ("Verbindung wird geprueft (das kann kurz dauern) ...",
+                   "Checking the link (this can take a moment) ..."),
+    "joining":    ("Trete bei (warte auf den Host) ...",
+                   "Joining (waiting for the host) ..."),
     "lobby":      ("Lobby", "Lobby"),
+    "invite_label": ("Einladungscode (einfach weitergeben)",
+                     "Invite code (just share it)"),
+    "copy":       ("Kopieren", "Copy"),
+    "copied":     ("Kopiert!", "Copied!"),
     "share_code": ("Teile diesen Code mit den anderen",
                    "Share this code with the others"),
     "characters": ("Figuren", "Characters"),
@@ -386,6 +413,11 @@ class Game(tk.Tk):
         self.srv_var = None
         self.name_var = None
         self.code_var = None
+        self.adv_server = False       # "eigener/gemieteter Server" aufgeklappt?
+        self.online_public = None     # oeffentliche Adresse (fuer Einladung)
+        self.online_invite = None     # fertiger Einladungscode (Host)
+        self._tunnel = None           # laufender Cloudflare-Tunnel (Host)
+        self._local_httpd = None      # lokaler Relay dieses Rechners (Host)
 
         self.upd_info = None          # gefundenes Release / found release
         self.upd_open = False         # Changelog aufgeklappt?
@@ -1781,12 +1813,17 @@ class Game(tk.Tk):
         if self.code_var is None:
             return
         val = self.code_var.get()
+        # Einladungscodes (lang, Gross-/Kleinschreibung zaehlt) nicht anfassen;
+        # nur kurze, blanke Raumcodes grossschreiben.
+        if len(val.strip()) > 8:
+            return
         up = val.upper()
         if up != val:
             self.code_var.set(up)
 
     def show_online(self):
-        """Hub: Server + Name eintragen, dann hosten oder beitreten."""
+        """Hub: Name eintragen, dann auf dem eigenen Rechner hosten
+        (oder mit Einladungscode beitreten)."""
         self.screen = "online"
         self._set_phase("idle")
         self._stop_audio()
@@ -1797,9 +1834,9 @@ class Game(tk.Tk):
 
         self._btn(34, 24, 120, 38, "‹  " + t("menu"), self.show_menu, "flat",
                   font=("Segoe UI", 11))
-        cv.create_text(w / 2, 60, text=t("online_head"), fill=TXT,
-                       font=("Segoe UI Black", 30))
-        cv.create_text(w / 2, 102, text=t("online_sub"), fill=DIM,
+        cv.create_text(w / 2, 56, text=t("online_head"), fill=TXT,
+                       font=("Segoe UI Black", 28))
+        cv.create_text(w / 2, 94, text=t("online_sub"), fill=DIM,
                        font=("Segoe UI", 11), width=min(780, w - 140),
                        justify="center")
 
@@ -1816,42 +1853,66 @@ class Game(tk.Tk):
         x1 = min(w - 80, w / 2 + 360)
         colw = x1 - x0
 
-        y = 150
-        cv.create_text(x0, y, anchor="w", text=t("srv"), fill=DIM,
-                       font=("Segoe UI Semibold", 11))
-        self._mk_entry(x0 + 130, y, colw - 130, self.srv_var)
-        y += 44
+        y = 138
         cv.create_text(x0, y, anchor="w", text=t("your_name"), fill=DIM,
                        font=("Segoe UI Semibold", 11))
         self._mk_entry(x0 + 130, y, colw - 130, self.name_var)
 
-        # Host-Karte
-        y += 40
-        ch = 118
+        # ---- Host-Karte ----
+        y += 36
+        ch = 150
         round_rect(cv, x0, y, x1, y + ch, r=16, fill=PANEL, outline=EDGE)
-        cv.create_text(x0 + 24, y + 28, anchor="w", text=t("host_head"),
+        cv.create_text(x0 + 24, y + 26, anchor="w", text=t("host_head"),
                        fill=TXT, font=("Segoe UI Semibold", 14))
         pname = self.packs[self.sel_pack].name if self.packs else "-"
-        cv.create_text(x0 + 24, y + 58, anchor="w",
+        cv.create_text(x1 - 24, y + 26, anchor="e",
                        text=t("host_pack_is", pname), fill=DIM,
                        font=("Segoe UI", 11))
-        self._btn(x1 - 210, y + 37, 186, 44, t("open_room"),
-                  self.host_open_room, "go", font=("Segoe UI Semibold", 12))
+        # Primaer: auf dem eigenen Rechner hosten (kein Setup, kein Port)
+        self._btn(x0 + 24, y + 48, colw - 48, 46, "🚀  " + t("host_mine"),
+                  self.host_on_my_machine, "go",
+                  font=("Segoe UI Semibold", 13))
+        cv.create_text(x0 + 24, y + 108, anchor="w", text=t("host_mine_hint"),
+                       fill=DIM, font=("Segoe UI", 10),
+                       width=colw - 48, justify="left")
+        # Umschalter fuer Fortgeschrittene: eigener/gemieteter Server
+        self._btn(x0 + 24, y + 126, colw - 48, 20,
+                  t("adv_hide") if self.adv_server else t("adv_srv"),
+                  self._toggle_adv_server, "flat",
+                  font=("Segoe UI", 9))
 
-        # Join-Karte
-        y += ch + 20
-        round_rect(cv, x0, y, x1, y + ch, r=16, fill=PANEL, outline=EDGE)
-        cv.create_text(x0 + 24, y + 28, anchor="w", text=t("join_head"),
+        y += ch + 14
+        if self.adv_server:
+            sh = 92
+            round_rect(cv, x0, y, x1, y + sh, r=14, fill=PANEL, outline=EDGE)
+            cv.create_text(x0 + 24, y + 26, anchor="w", text=t("srv"),
+                           fill=DIM, font=("Segoe UI Semibold", 11))
+            self._mk_entry(x0 + 110, y + 26, colw - 300, self.srv_var)
+            self._btn(x1 - 170, y + 24, 146, 42, t("open_room"),
+                      self.host_open_room, "primary",
+                      font=("Segoe UI Semibold", 12))
+            y += sh + 14
+
+        # ---- Join-Karte ----
+        jh = 128
+        round_rect(cv, x0, y, x1, y + jh, r=16, fill=PANEL, outline=EDGE)
+        cv.create_text(x0 + 24, y + 26, anchor="w", text=t("join_head"),
                        fill=TXT, font=("Segoe UI Semibold", 14))
-        cv.create_text(x0 + 24, y + 62, anchor="w", text=t("room_code"),
+        cv.create_text(x0 + 24, y + 52, anchor="w", text=t("invite_or_code"),
                        fill=DIM, font=("Segoe UI Semibold", 11))
-        self._mk_entry(x0 + 140, y + 62, 150, self.code_var)
-        self._btn(x1 - 210, y + 37, 186, 44, t("join_btn"),
+        self._mk_entry(x0 + 24, y + 74, colw - 200, self.code_var)
+        self._btn(x1 - 170, y + 62, 146, 44, t("join_btn"),
                   self.join_open_room, "primary",
                   font=("Segoe UI Semibold", 12))
+        cv.create_text(x0 + 24, y + 108, anchor="w", text=t("invite_hint"),
+                       fill=DIM, font=("Segoe UI", 9))
 
-        self.online_status = cv.create_text(w / 2, y + ch + 32, text="",
+        self.online_status = cv.create_text(w / 2, y + jh + 24, text="",
                                             fill=DIM, font=("Segoe UI", 11))
+
+    def _toggle_adv_server(self):
+        self.adv_server = not self.adv_server
+        self.show_online()
 
     def _online_prereqs(self):
         if not self.mic.available:
@@ -1897,6 +1958,95 @@ class Game(tk.Tk):
             self._probe_frame_size()
             self.online_net = self._new_sess
             self.online_role = "host"
+            self.online_public = base
+            self.online_invite = net.make_invite(base, self._new_sess.code)
+            self.lobby_state = {}
+            self.enter_lobby()
+        self._run_bg(work, done)
+
+    def host_on_my_machine(self):
+        """Hostet direkt auf diesem Rechner: lokaler Relay + Cloudflare-Tunnel
+        (oeffentliche Adresse ohne Portfreigabe), dann Raum anlegen."""
+        if self._net_busy:
+            return
+        if not self.packs:
+            self._online_say(t("no_sel_pack"), RED)
+            return
+        if not self._online_prereqs():
+            return
+        name = (self.name_var.get() or "Host").strip() or "Host"
+        self.cfg["player_name"] = name
+        save_cfg(self.cfg)
+        self.pack = self.packs[self.sel_pack]
+        self._net_busy = True
+        self._online_say(t("tun_prep"), GOLD)
+        fps = int(self.cfg.get("video_fps") or ds.FRAME_FPS)
+        self._new_httpd = None
+        self._new_tunnel = None
+
+        def work():
+            try:
+                # 1) Verbindungs-Helfer sicherstellen (ggf. einmalig laden)
+                def prog(pct):
+                    self.msgq.put(("online_say", (t("tun_dl", pct), GOLD)))
+                exe = tun.ensure_cloudflared(progress=prog)
+                # 2) lokalen Relay auf freiem Port starten
+                httpd, port = srv.start_background(0)
+                self._new_httpd = httpd
+                # 3) sichere oeffentliche Verbindung oeffnen
+                self.msgq.put(("online_say", (t("tun_start"), GOLD)))
+                tunnel = tun.Tunnel(exe, port)
+                public = tunnel.start()
+                self._new_tunnel = tunnel
+                self._new_public = public
+                # 3b) Kurz pruefen, ob die Adresse schon erreichbar ist
+                #     (nur Aufwaermen). Wir blockieren NICHT lange: der eigene
+                #     Resolver des Hosts ist bei frischen Tunneln oft zaeh,
+                #     waehrend Mitspieler sie meist in Sekunden aufloesen. Der
+                #     Beitritt der Spieler versucht es ohnehin geduldig erneut.
+                self.msgq.put(("online_say", (t("tun_verify"), GOLD)))
+                warm = time.time() + 12
+                while time.time() < warm:
+                    if net.ping(public, timeout=5):
+                        break
+                    time.sleep(3)
+                # 4) Medien vorbereiten
+                ds.load_pack_audio(self.pack)
+                ds.extract_frames(self.pack, fps=max(8, min(30, fps)))
+                # 5) Raum anlegen -- der Host spricht ueber localhost (schnell,
+                #    zuverlaessig), die Einladung traegt die oeffentliche Adresse.
+                self.msgq.put(("online_say", (t("uploading"), GOLD)))
+                self._new_sess = net.create_room(
+                    "http://localhost:%d" % port, self.pack, host_name=name)
+            except Exception:
+                # Halb gestartete Teile wieder abbauen, damit nichts haengt.
+                try:
+                    if self._new_tunnel is not None:
+                        self._new_tunnel.stop()
+                except Exception:
+                    pass
+                try:
+                    if self._new_httpd is not None:
+                        self._new_httpd.shutdown()
+                except Exception:
+                    pass
+                self._new_tunnel = None
+                self._new_httpd = None
+                raise
+
+        def done():
+            self._net_busy = False
+            for l in self.pack.lines:
+                l.take = None
+            self._imgcache = {}
+            self._probe_frame_size()
+            self.online_net = self._new_sess
+            self.online_role = "host"
+            self._tunnel = self._new_tunnel
+            self._local_httpd = self._new_httpd
+            self.online_public = self._new_public
+            self.online_invite = net.make_invite(self._new_public,
+                                                 self._new_sess.code)
             self.lobby_state = {}
             self.enter_lobby()
         self._run_bg(work, done)
@@ -1904,27 +2054,54 @@ class Game(tk.Tk):
     def join_open_room(self):
         if self._net_busy:
             return
-        base = (self.srv_var.get() or "").strip()
-        code = (self.code_var.get() or "").strip().upper()
-        if not base:
-            self._online_say(t("need_srv"), RED)
-            return
-        if not code:
+        entry = (self.code_var.get() or "").strip()
+        if not entry:
             self._online_say(t("need_code"), RED)
             return
+        # Ein Einladungscode traegt Adresse UND Raumcode in einem String.
+        parsed = net.parse_invite(entry)
+        if parsed is not None:
+            base, code = parsed
+        else:
+            # Blanker Raumcode -> braucht die Serveradresse aus dem Feld.
+            base = (self.srv_var.get() or "").strip()
+            code = entry.upper()
+            if not base:
+                self._online_say(t("need_srv"), RED)
+                return
         if not self._online_prereqs():
             return
         name = (self.name_var.get() or "Player").strip() or "Player"
         self.cfg["server_url"] = base
         self.cfg["player_name"] = name
         save_cfg(self.cfg)
+        self.online_public = base
+        self.online_invite = net.make_invite(base, code)
         self._net_busy = True
         self._online_say(t("connecting"), GOLD)
         fps = int(self.cfg.get("video_fps") or ds.FRAME_FPS)
         dest = os.path.join(ONLINE_DIR, code)
 
         def work():
-            sess = net.join_room(base, code, name=name)
+            # Frische Host-Tunnel brauchen evtl. kurz, bis sie per DNS
+            # erreichbar sind -> ein paar Mal freundlich erneut versuchen.
+            sess = None
+            deadline = time.time() + 90
+            last = None
+            while True:
+                try:
+                    sess = net.join_room(base, code, name=name)
+                    break
+                except net.NetError as e:
+                    last = e
+                    # Nur bei Erreichbarkeits-Problemen warten; echte Fehler
+                    # (Raum voll, Code falsch) sofort melden.
+                    if e.status is not None or time.time() >= deadline:
+                        raise
+                    self.msgq.put(("online_say", (t("joining"), GOLD)))
+                    time.sleep(3)
+            if sess is None and last is not None:
+                raise last
             self.msgq.put(("online_say", (t("downloading"), GOLD)))
             sess.download_pack_to(dest)
             pack = ds.load_pack(dest)
@@ -1999,12 +2176,14 @@ class Game(tk.Tk):
                        font=("Segoe UI", 11))
 
         code = self.online_net.code
-        round_rect(cv, w / 2 - 150, 84, w / 2 + 150, 150, r=16, fill=PANEL,
+        round_rect(cv, w / 2 - 190, 80, w / 2 + 190, 150, r=16, fill=PANEL,
                    outline=ACC)
-        cv.create_text(w / 2, 108, text=code, fill=ACC_HI,
-                       font=("Consolas", 32, "bold"))
-        cv.create_text(w / 2, 136, text=t("share_code"), fill=DIM,
-                       font=("Segoe UI", 10))
+        cv.create_text(w / 2 - 166, 108, anchor="w", text=code, fill=ACC_HI,
+                       font=("Consolas", 30, "bold"))
+        self._btn(w / 2 + 44, 94, 132, 40, "📋  " + t("copy"),
+                  self._copy_invite, "primary", font=("Segoe UI Semibold", 11))
+        cv.create_text(w / 2 - 166, 136, anchor="w", text=t("invite_label"),
+                       fill=DIM, font=("Segoe UI", 9))
 
         top = 178
         colgap = 30
@@ -2198,6 +2377,44 @@ class Game(tk.Tk):
                 pass
         threading.Thread(target=work, daemon=True).start()
 
+    def _copy_invite(self):
+        """Legt den Einladungscode in die Zwischenablage."""
+        inv = self.online_invite
+        if not inv and self.online_net is not None:
+            inv = net.make_invite(self.online_public or self.online_net.base,
+                                  self.online_net.code)
+        if not inv:
+            return
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(inv)
+        except Exception:
+            pass
+        self._lobby_note = t("copied")
+        if self.screen == "lobby":
+            self.build_lobby()
+
+    def _teardown_host_server(self):
+        """Stoppt (falls dieser Rechner hostet) Tunnel und lokalen Relay."""
+        tunnel, httpd = self._tunnel, self._local_httpd
+        self._tunnel = None
+        self._local_httpd = None
+        if tunnel is None and httpd is None:
+            return
+
+        def work():
+            try:
+                if tunnel is not None:
+                    tunnel.stop()
+            except Exception:
+                pass
+            try:
+                if httpd is not None:
+                    httpd.shutdown()
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
     def leave_online(self):
         if not messagebox.askyesno(t("title"), t("leave_room_q")):
             return
@@ -2215,6 +2432,8 @@ class Game(tk.Tk):
         self.lobby_state = {}
         self._lobby_note = ""
         self._lobby_neterr = None
+        self.online_invite = None
+        self.online_public = None
 
         def work():
             try:
@@ -2223,6 +2442,7 @@ class Game(tk.Tk):
             except Exception:
                 pass
         threading.Thread(target=work, daemon=True).start()
+        self._teardown_host_server()
         self.show_menu()
 
     # ------------------------------------------------------- Hintergrund
@@ -2286,6 +2506,7 @@ class Game(tk.Tk):
 
     def _on_close(self):
         self._stop_audio()
+        self._teardown_host_server()
         save_cfg(self.cfg)
         self.destroy()
 

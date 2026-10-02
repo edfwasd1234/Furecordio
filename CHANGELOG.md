@@ -7,7 +7,27 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Host online games straight from your own machine — no setup, no
+  port-forwarding.** In DubStage → **Play online**, press **🚀 Host on my
+  machine**. DubStage runs the relay in-process and exposes it through a
+  Cloudflare *quick tunnel* (`cloudflared`), so a public `https://…trycloudflare.com`
+  address appears without any account, router changes or configuration. The
+  `cloudflared` helper is fetched once into `tools/` on first use, like ffmpeg.
+- **Single invite code.** Hosting now produces one invite code that carries the
+  server address *and* the room code together; a **📋 Copy** button in the lobby
+  puts it on the clipboard. Players paste that one code into **Join** — no server
+  address to type. A bare room code still works together with the server field
+  under **Use my own / a hosted server**.
+- Players joining a freshly opened self-hosted room retry patiently (up to ~90 s)
+  while the tunnel's DNS propagates, instead of failing on the first attempt.
+
+### Changed
+
+- The relay can now run inside DubStage (`dubstage_server.start_background`) in
+  addition to standing alone on a hosted server; harmless connection resets from
+  tunnels/browsers no longer print tracebacks.
 
 ## [1.1.0] - 2026-08-15
 

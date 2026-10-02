@@ -17,11 +17,21 @@
 
 ## Online multiplayer
 
-Host a room, friends join with a short code, everyone dubs **their own characters** in parallel, and the host stitches it all together in scene order — Gartic-Phone style, up to **10 players**. It runs on a tiny standard-library relay server you can deploy **free in one click**:
+Host a room, friends join, everyone dubs **their own characters** in parallel, and the host stitches it all together in scene order — Gartic-Phone style, up to **10 players**.
+
+### Host on your own machine — no setup, no port-forwarding
+
+In DubStage → **Play online**, pick your pack and press **🚀 Host on my machine**. DubStage runs the little relay right on your PC and opens a secure internet link for it through a [Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) — **no account, no router settings, nothing to configure**. The first time, it fetches a small `cloudflared` helper into `tools/` (like ffmpeg).
+
+You get an **invite code**. Hit **📋 Copy**, send it to your friends, and they paste it into **Play online → Invite code → Join**. That one code carries the address *and* the room — players never type a server. Players on other networks can take up to a minute on their first connect while DNS catches up; DubStage keeps retrying for them automatically. The room lives only while you (the host) keep DubStage open.
+
+### Or run a shared/hosted server
+
+Prefer an always-on room that does not depend on one person's PC? Deploy the same standard-library relay **free in one click**:
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/edfwasd1234/Furecordio)
 
-After it deploys, Render gives you a `https://…onrender.com` URL — paste it into DubStage → **Play online → Server**. Full walkthrough in [`DEPLOY_SERVER.md`](DEPLOY_SERVER.md).
+Render gives you a `https://…onrender.com` URL — in DubStage → **Play online**, open **Use my own / a hosted server**, paste it, and **Open room**. Full walkthrough in [`DEPLOY_SERVER.md`](DEPLOY_SERVER.md).
 
 ---
 

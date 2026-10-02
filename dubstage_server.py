@@ -21,6 +21,7 @@ import os
 import re
 import secrets
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -133,6 +134,21 @@ class Room(object):
 
 ROOMS = {}
 LOCK = threading.RLock()
+_PRUNE_STARTED = False
+
+
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """Wie ThreadingHTTPServer, aber harmlose Verbindungsabbrueche (ein
+    Tunnel/Browser schliesst die Verbindung) landen nicht als Traceback auf
+    der Konsole."""
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionError, ConnectionResetError,
+                            BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
 
 
 def _token(n=16):
@@ -442,10 +458,32 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # --------------------------------------------------------------------------
+def _ensure_prune():
+    """Startet den Aufraeum-Thread genau einmal pro Prozess."""
+    global _PRUNE_STARTED
+    if not _PRUNE_STARTED:
+        _PRUNE_STARTED = True
+        threading.Thread(target=_prune_loop, daemon=True).start()
+
+
+def start_background(port=0, host="0.0.0.0"):
+    """Startet den Relay im selben Prozess in einem Daemon-Thread und gibt
+    (httpd, port) zurueck. port=0 -> freier Port wird gewaehlt.
+
+    Damit kann DubStage selbst einen Raum auf diesem Rechner anbieten, ohne
+    einen separaten Python-Prozess oder einen gemieteten Server zu brauchen.
+    """
+    os.makedirs(DATA_DIR, exist_ok=True)
+    _ensure_prune()
+    httpd = QuietThreadingHTTPServer((host, port), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, httpd.server_address[1]
+
+
 def main():
     os.makedirs(DATA_DIR, exist_ok=True)
-    threading.Thread(target=_prune_loop, daemon=True).start()
-    httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    _ensure_prune()
+    httpd = QuietThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print("DubStage server %s on port %d  (data: %s)"
           % (VERSION, PORT, DATA_DIR))
     try:
