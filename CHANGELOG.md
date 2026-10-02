@@ -7,6 +7,10 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [1.2.0] - 2026-10-02
+
 ### Added
 
 - **Host online games straight from your own machine — no setup, no
