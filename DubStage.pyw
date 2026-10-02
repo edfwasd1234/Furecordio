@@ -441,6 +441,11 @@ class Game(tk.Tk):
         self._local_httpd = None      # lokaler Relay dieses Rechners (Host)
         self._asm_pulled = 0          # beim Zusammenbau geholte Takes
         self._asm_merged = 0          # davon in den Pack uebernommen
+        self._asm_pack = None         # frisch zusammengebauter Pack (Host)
+        self._asm_mix = None          # fertiger Mix dazu
+        self._asm_dubbed = 0          # Zeilen mit Aufnahme nach dem Zusammenbau
+        self._asm_total = 0
+        self._pending_mix = None      # vorab berechneter Mix fuers Finale
         self._upload_fail = 0         # fehlgeschlagene Take-Uploads
 
         self.upd_info = None          # gefundenes Release / found release
@@ -1674,7 +1679,12 @@ class Game(tk.Tk):
         self.screen = "finale"
         self._set_phase("idle")
         self._stop_audio()
-        self.mix = ds.render_dub(self.pack, match=self.match_var.get())
+        if self._pending_mix is not None:
+            # Vom Online-Zusammenbau bereits fertig berechnet.
+            self.mix = self._pending_mix
+            self._pending_mix = None
+        else:
+            self.mix = ds.render_dub(self.pack, match=self.match_var.get())
         self._clear_canvas()
         self._backdrop()
         cv = self.cv
@@ -2392,37 +2402,110 @@ class Game(tk.Tk):
         self._lobby_note = t("assembling")
         self.build_lobby()
         sess = self.online_net
+        match = bool(self.match_var.get())
 
         def work():
-            d = tempfile.mkdtemp(prefix="dubpull_")
+            import shutil
+            # ----------------------------------------------------------------
+            # Zusammenbau IMMER aus der maszgeblichen Server-Fassung des Packs
+            # (genau die, gegen die alle aufgenommen haben) + ALLEN Takes vom
+            # Server. Das haengt nicht mehr vom lokalen Zustand des Hosts ab und
+            # kann darum nicht mehr still "nur das Original" liefern.
+            # ----------------------------------------------------------------
+            pdir = os.path.join(ONLINE_DIR, "assemble_%s" % sess.code)
+            shutil.rmtree(pdir, ignore_errors=True)
+            sess.download_pack_to(pdir)
+            pack = ds.load_pack(pdir)
+            if pack is None:
+                raise RuntimeError("the room's pack could not be loaded")
+            ds.load_pack_audio(pack)
+            fps = int(self.cfg.get("video_fps") or ds.FRAME_FPS)
+            ds.extract_frames(pack, fps=max(8, min(30, fps)))
+
+            tdir = tempfile.mkdtemp(prefix="dubpull_")
+            hdir = tempfile.mkdtemp(prefix="dubhost_")
             try:
-                pulled = sess.pull_takes(d)
-                merged = ds.merge_take_dirs(self.pack, [d], override=True)
-                self._asm_pulled = len(pulled)
-                self._asm_merged = merged
-            finally:
+                pulled = sess.pull_takes(tdir)          # alle hochgeladenen Takes
+                matched = ds.import_takes(pack, tdir, override=True)
+                # Falls der Host eigene Aufnahmen hat, die (noch) nicht auf dem
+                # Server lagen, Luecken damit fuellen.
+                host_filled = 0
+                if self.pack is not None:
+                    ds.export_takes(self.pack, hdir)
+                    host_filled = ds.import_takes(pack, hdir, override=False)
+                mix = ds.render_dub(pack, match=match)
+
+                report = self._assemble_report(pack, pulled, matched,
+                                                host_filled, mix)
                 try:
-                    import shutil
-                    shutil.rmtree(d, ignore_errors=True)
+                    with open(os.path.join(APP_DIR, "last_assemble.txt"),
+                              "w", encoding="utf-8") as fh:
+                        fh.write(report)
                 except Exception:
                     pass
+                print(report)
+
+                self._asm_pack = pack
+                self._asm_mix = mix
+                self._asm_dubbed = sum(1 for l in pack.lines
+                                       if l.take is not None and len(l.take))
+                self._asm_total = len(pack.lines)
+                self._asm_pulled = len(pulled)
+            finally:
+                shutil.rmtree(tdir, ignore_errors=True)
+                shutil.rmtree(hdir, ignore_errors=True)
 
         def done():
             self._lobby_note = ""
             self.online_mode = False
-            # Wie viele Zeilen haben am Ende wirklich eine Aufnahme?
-            have = sum(1 for l in self.pack.lines
-                       if l.take is not None and len(l.take))
-            if have == 0:
-                # Nichts zu dubben -> klar sagen statt still das Original bauen.
-                messagebox.showwarning(
-                    t("title"), t("asm_none", self._asm_pulled))
+            if self._asm_dubbed == 0:
+                messagebox.showwarning(t("title"),
+                                       t("asm_none", self._asm_pulled))
+                self._asm_pack = None
+                self._asm_mix = None
                 self.enter_lobby()
                 return
-            # Host baut die Szene lokal zusammen und kann sie per
-            # Bildschirmfreigabe zeigen.
+            # Die maszgebliche, frisch zusammengebaute Fassung ist ab jetzt der
+            # Pack, den das Finale zeigt; der fertige Mix ist schon berechnet.
+            self.pack = self._asm_pack
+            self._pending_mix = self._asm_mix
+            self._asm_pack = None
+            self._asm_mix = None
+            self._imgcache = {}
+            self._probe_frame_size()
             self.build_finale()
         self._run_bg(work, done)
+
+    def _assemble_report(self, pack, pulled, matched, host_filled, mix):
+        """Lesbarer Bericht ueber den Zusammenbau - landet in last_assemble.txt
+        neben der App, damit ein stiller Fehler nachvollziehbar wird."""
+        lines = []
+        lines.append("DubStage assemble report  %s" %
+                     time.strftime("%Y-%m-%d %H:%M:%S"))
+        lines.append("pack folder : %s" % getattr(pack, "folder", "?"))
+        lines.append("video       : %s" % getattr(pack, "video", "?"))
+        lines.append("match voice : %s" % bool(self.match_var.get()))
+        lines.append("takes pulled from server : %d" % len(pulled))
+        lines.append("  %s" % ", ".join(sorted(pulled)) if pulled else "  (none)")
+        lines.append("matched into pack        : %d" % matched)
+        lines.append("filled from host locally : %d" % host_filled)
+        dub = sum(1 for l in pack.lines if l.take is not None and len(l.take))
+        lines.append("lines dubbed             : %d / %d" % (dub, len(pack.lines)))
+        try:
+            peak = float(np.max(np.abs(mix))) if len(mix) else 0.0
+            rms = float(np.sqrt(np.mean(np.square(mix)))) if len(mix) else 0.0
+        except Exception:
+            peak = rms = -1.0
+        lines.append("final mix  : peak=%.4f rms=%.4f len=%d" %
+                     (peak, rms, len(mix)))
+        lines.append("")
+        lines.append("per line (file | character | start | take?):")
+        for l in pack.lines:
+            has = l.take is not None and len(l.take)
+            lines.append("  %-28s %-12s %8.3f  %s" %
+                         (l.file, (l.character or "-"), l.start,
+                          ("take %d" % len(l.take)) if has else "NO TAKE"))
+        return "\n".join(lines)
 
     def _upload_take(self, clip, data):
         sess = self.online_net

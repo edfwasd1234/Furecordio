@@ -9,6 +9,17 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 Nothing yet.
 
+## [1.2.1] - 2026-10-02
+
+### Fixed
+
+- **Online assembly no longer silently drops the dubs.** The host now rebuilds
+  the scene from the room's own pack on the server (exactly what everyone
+  recorded against) plus every uploaded take, instead of merging into the host's
+  in-memory copy. Every assemble writes a `last_assemble.txt` report next to the
+  app (pack, per-line take status, matched counts, final mix level) so a bad
+  result can be diagnosed instead of guessed at.
+
 ## [1.2.0] - 2026-10-02
 
 ### Added

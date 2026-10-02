@@ -35,7 +35,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 # ------------------------------------------------------------------ Eckdaten
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 REPO = "edfwasd1234/Furecordio"
 
 API_LATEST = "https://api.github.com/repos/%s/releases/latest" % REPO
