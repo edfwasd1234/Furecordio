@@ -423,11 +423,12 @@ rem (Keine PID-Pruefung mehr - tasklist/find war unzuverlaessig.)
 ping -n 4 127.0.0.1 >nul
 
 rem Programmressourcen spiegeln (enthalten keine Benutzerdaten). /R:120 /W:1 =
-rem bis zu 120 s je noch gesperrter Datei abwarten.
-robocopy "%SRC%\_internal" "%DST%\_internal" /MIR /R:120 /W:1 /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1
+rem bis zu 120 s je noch gesperrter Datei abwarten. /IS /IT erzwingen das
+rem Kopieren auch scheinbar gleicher Dateien (sonst ueberspringt robocopy sie).
+robocopy "%SRC%\_internal" "%DST%\_internal" /MIR /IS /IT /R:120 /W:1 /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1
 set "RC1=%ERRORLEVEL%"
 rem Die beiden Programme selbst tauschen.
-robocopy "%SRC%" "%DST%" DubStage.exe DubMaker.exe /R:120 /W:1 /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1
+robocopy "%SRC%" "%DST%" DubStage.exe DubMaker.exe /IS /IT /R:120 /W:1 /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1
 set "RC2=%ERRORLEVEL%"
 echo robocopy _internal=%RC1%  exe=%RC2% >> "%LOG%"
 
