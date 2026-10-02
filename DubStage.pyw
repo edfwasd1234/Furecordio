@@ -203,6 +203,17 @@ T = {
     "assemble":   ("Szene zusammenbauen", "Assemble the scene"),
     "assembling": ("Takes werden geholt und gemischt ...",
                    "Fetching takes and mixing ..."),
+    "asm_none":   ("Keine Aufnahmen gefunden (%d vom Server geholt).\n\n"
+                   "Stelle sicher, dass alle ihre Zeilen aufgenommen haben "
+                   "und die Fortschrittsbalken voll sind, dann noch einmal "
+                   "„Zusammenbauen“.",
+                   "No recordings found (%d pulled from the server).\n\n"
+                   "Make sure everyone recorded their lines and the progress "
+                   "bars are full, then press “Assemble” again."),
+    "upload_fail_note": ("⚠ %d Aufnahme(n) konnten nicht hochgeladen "
+                         "werden – bitte diese Zeile(n) erneut aufnehmen.",
+                         "⚠ %d recording(s) failed to upload – please "
+                         "record those line(s) again."),
     "leave_room": ("Raum verlassen", "Leave room"),
     "host_tag":   ("Host", "Host"),
     "you_tag":    ("du", "you"),
@@ -418,6 +429,9 @@ class Game(tk.Tk):
         self.online_invite = None     # fertiger Einladungscode (Host)
         self._tunnel = None           # laufender Cloudflare-Tunnel (Host)
         self._local_httpd = None      # lokaler Relay dieses Rechners (Host)
+        self._asm_pulled = 0          # beim Zusammenbau geholte Takes
+        self._asm_merged = 0          # davon in den Pack uebernommen
+        self._upload_fail = 0         # fehlgeschlagene Take-Uploads
 
         self.upd_info = None          # gefundenes Release / found release
         self.upd_open = False         # Changelog aufgeklappt?
@@ -2347,8 +2361,10 @@ class Game(tk.Tk):
         def work():
             d = tempfile.mkdtemp(prefix="dubpull_")
             try:
-                sess.pull_takes(d)
-                ds.merge_take_dirs(self.pack, [d], override=True)
+                pulled = sess.pull_takes(d)
+                merged = ds.merge_take_dirs(self.pack, [d], override=True)
+                self._asm_pulled = len(pulled)
+                self._asm_merged = merged
             finally:
                 try:
                     import shutil
@@ -2359,6 +2375,15 @@ class Game(tk.Tk):
         def done():
             self._lobby_note = ""
             self.online_mode = False
+            # Wie viele Zeilen haben am Ende wirklich eine Aufnahme?
+            have = sum(1 for l in self.pack.lines
+                       if l.take is not None and len(l.take))
+            if have == 0:
+                # Nichts zu dubben -> klar sagen statt still das Original bauen.
+                messagebox.showwarning(
+                    t("title"), t("asm_none", self._asm_pulled))
+                self.enter_lobby()
+                return
             # Host baut die Szene lokal zusammen und kann sie per
             # Bildschirmfreigabe zeigen.
             self.build_finale()
@@ -2373,8 +2398,11 @@ class Game(tk.Tk):
         def work():
             try:
                 sess.upload_take(clip, payload)
-            except Exception:
-                pass
+            except Exception as ex:
+                # Nicht mehr still verschlucken: zaehlen und dem Nutzer zeigen,
+                # sonst fehlen am Ende unerklaerlich die Dubs.
+                traceback.print_exc()
+                self.msgq.put(("upload_fail", str(ex)))
         threading.Thread(target=work, daemon=True).start()
 
     def _copy_invite(self):
@@ -2477,6 +2505,11 @@ class Game(tk.Tk):
                 elif kind == "online_say":
                     text, colour = payload
                     self._online_say(text, colour)
+                elif kind == "upload_fail":
+                    self._upload_fail += 1
+                    self._lobby_note = t("upload_fail_note", self._upload_fail)
+                    if self.screen == "lobby":
+                        self.build_lobby()
                 elif kind == "update":
                     upd.note_checked(self.cfg)
                     self.cfg["upd_cache"] = payload
