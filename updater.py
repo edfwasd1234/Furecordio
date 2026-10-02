@@ -417,27 +417,28 @@ echo ---- Update __TAG__  %DATE% %TIME% > "%LOG%"
 echo Quelle : %SRC% >> "%LOG%"
 echo Ziel   : %DST% >> "%LOG%"
 
-rem Warten, bis die App (PID) wirklich beendet ist (hoechstens ~60 s).
-set /a N=0
-:wait
-tasklist /fi "PID eq __PID__" 2>nul | find "__PID__" >nul
-if errorlevel 1 goto :swap
-set /a N+=1
-if %N% GEQ 120 goto :giveup
-ping -n 2 127.0.0.1 >nul
-goto :wait
+rem Kurz warten, damit sich die App schliesst. Danach uebernimmt robocopy das
+rem Warten: gesperrte Dateien werden geduldig wiederholt, bis sie frei sind.
+rem (Keine PID-Pruefung mehr - tasklist/find war unzuverlaessig.)
+ping -n 4 127.0.0.1 >nul
 
-:swap
-rem Programmressourcen spiegeln (enthalten keine Benutzerdaten).
-robocopy "%SRC%\_internal" "%DST%\_internal" /MIR /R:30 /W:1 /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1
-rem Die beiden Programme tauschen (robocopy wiederholt gesperrte Dateien).
-robocopy "%SRC%" "%DST%" DubStage.exe DubMaker.exe /R:30 /W:1 /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1
+rem Programmressourcen spiegeln (enthalten keine Benutzerdaten). /R:120 /W:1 =
+rem bis zu 120 s je noch gesperrter Datei abwarten.
+robocopy "%SRC%\_internal" "%DST%\_internal" /MIR /R:120 /W:1 /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1
+set "RC1=%ERRORLEVEL%"
+rem Die beiden Programme selbst tauschen.
+robocopy "%SRC%" "%DST%" DubStage.exe DubMaker.exe /R:120 /W:1 /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1
+set "RC2=%ERRORLEVEL%"
+echo robocopy _internal=%RC1%  exe=%RC2% >> "%LOG%"
+
+rem robocopy: Rueckgabe 0-7 ist Erfolg, ab 8 ein Fehler.
+if %RC1% GEQ 8 goto :fehler
+if %RC2% GEQ 8 goto :fehler
 echo Update eingespielt. >> "%LOG%"
 goto :starten
 
-:giveup
-echo App lief noch - Update abgebrochen. >> "%LOG%"
-goto :cleanup
+:fehler
+echo Tausch fehlgeschlagen - siehe Meldungen oben. >> "%LOG%"
 
 :starten
 start "" "%DST%\DubStage.exe"
@@ -491,14 +492,15 @@ def apply_packaged(staged_root, app_dir, tag="", stage_dir=None):
             .replace("__DST__", app_dir.rstrip("\\/"))
             .replace("__LOG__", log)
             .replace("__STAGE__", (stage_dir or staged_root).rstrip("\\/"))
-            .replace("__TAG__", tag or "?")
-            .replace("__PID__", str(os.getpid())))
+            .replace("__TAG__", tag or "?"))
 
     with io.open(bat, "w", encoding="cp1252", errors="replace",
                  newline="\r\n") as f:
         f.write(text)
 
-    flags = 0x00000008 | 0x00000200          # DETACHED | NEW_PROCESS_GROUP
+    # Ohne sichtbares Konsolenfenster und losgeloest vom Elternprozess, damit
+    # der Helfer weiterlaeuft, nachdem sich die App beendet hat.
+    flags = 0x08000000 | 0x00000200          # CREATE_NO_WINDOW | NEW_GROUP
     subprocess.Popen([os.environ.get("COMSPEC", "cmd.exe"), "/c", bat],
                      cwd=tmp, close_fds=True, creationflags=flags)
     return log
