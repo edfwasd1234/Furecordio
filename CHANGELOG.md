@@ -22,6 +22,13 @@ versioning follows [Semantic Versioning](https://semver.org/).
   under **Use my own / a hosted server**.
 - Players joining a freshly opened self-hosted room retry patiently (up to ~90 s)
   while the tunnel's DNS propagates, instead of failing on the first attempt.
+- **Shared updates in a room.** Everyone's app version is shared in the lobby,
+  and anyone running an older version than the newest person in the room sees an
+  **Update** button. From source it runs the normal in-app update (download,
+  verify, swap, restart); from the packaged build it opens the releases page to
+  grab the new zip. The auto-updater now points at this project's own repository.
+- Online assembly reports what it gathered and warns instead of silently
+  building a dub-less video; failed take uploads are surfaced in the lobby.
 
 ### Changed
 

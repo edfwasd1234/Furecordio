@@ -262,11 +262,13 @@ class Session(object):
 # --------------------------------------------------------------------------
 # Einstiegspunkte
 # --------------------------------------------------------------------------
-def create_room(base_url, pack, host_name="Host", upload=True):
+def create_room(base_url, pack, host_name="Host", upload=True, app_version=""):
     """Host: Raum anlegen und (optional) das Pack hochladen."""
     base = base_url.rstrip("/")
     manifest = manifest_from_pack(pack)
     manifest["host_name"] = host_name
+    if app_version:
+        manifest["app_version"] = app_version
     res = _request("POST", base + "/rooms", data=_jbytes(manifest),
                    ctype="application/json")
     sess = Session(base, res["code"], res["player_id"], res["token"],
@@ -276,10 +278,13 @@ def create_room(base_url, pack, host_name="Host", upload=True):
     return sess
 
 
-def join_room(base_url, code, name="Player"):
+def join_room(base_url, code, name="Player", app_version=""):
     """Spieler: Raum betreten. Danach download_pack_to(...) aufrufen."""
     base = base_url.rstrip("/")
+    body = {"name": name}
+    if app_version:
+        body["app_version"] = app_version
     res = _request("POST", "/".join([base, "rooms", code.upper(), "join"]),
-                   data=_jbytes({"name": name}), ctype="application/json")
+                   data=_jbytes(body), ctype="application/json")
     return Session(base, code.upper(), res["player_id"], res["token"],
                    manifest=res.get("manifest", {}))

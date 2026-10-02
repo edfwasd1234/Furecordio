@@ -36,7 +36,7 @@ from urllib.request import Request, urlopen
 
 # ------------------------------------------------------------------ Eckdaten
 VERSION = "1.1.0"
-REPO = "xmrius/dubstage"
+REPO = "edfwasd1234/Furecordio"
 
 API_LATEST = "https://api.github.com/repos/%s/releases/latest" % REPO
 RELEASES_PAGE = "https://github.com/%s/releases" % REPO

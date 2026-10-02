@@ -223,6 +223,16 @@ T = {
     "net_lost":   ("Server nicht erreichbar - erneuter Versuch ...",
                    "Server unreachable - retrying ..."),
     "leave_room_q": ("Raum verlassen?", "Leave the room?"),
+    "update_to":  ("⬆  Update auf %s", "⬆  Update to %s"),
+    "update_exe": ("Andere im Raum nutzen schon Version %s.\n\n"
+                   "Lade die neue Version von der Release-Seite herunter und "
+                   "entpacke sie ueber die alte – Packs, Aufnahmen und "
+                   "Einstellungen bleiben erhalten.",
+                   "Others in the room are already on version %s.\n\n"
+                   "Download the new version from the releases page and unzip "
+                   "it over the old one – your packs, recordings and "
+                   "settings are kept."),
+    "update_checking": ("Suche das Update ...", "Looking for the update ..."),
     "match": ("Stimme ans Original angleichen (Lautstaerke + Hall)",
               "Match original voice (volume + echo)"),
 
@@ -1962,7 +1972,8 @@ class Game(tk.Tk):
             ds.load_pack_audio(self.pack)
             ds.extract_frames(self.pack, fps=max(8, min(30, fps)))
             self.msgq.put(("online_say", (t("uploading"), GOLD)))
-            self._new_sess = net.create_room(base, self.pack, host_name=name)
+            self._new_sess = net.create_room(base, self.pack, host_name=name,
+                                             app_version=upd.VERSION)
 
         def done():
             self._net_busy = False
@@ -2031,7 +2042,8 @@ class Game(tk.Tk):
                 #    zuverlaessig), die Einladung traegt die oeffentliche Adresse.
                 self.msgq.put(("online_say", (t("uploading"), GOLD)))
                 self._new_sess = net.create_room(
-                    "http://localhost:%d" % port, self.pack, host_name=name)
+                    "http://localhost:%d" % port, self.pack, host_name=name,
+                    app_version=upd.VERSION)
             except Exception:
                 # Halb gestartete Teile wieder abbauen, damit nichts haengt.
                 try:
@@ -2104,7 +2116,8 @@ class Game(tk.Tk):
             last = None
             while True:
                 try:
-                    sess = net.join_room(base, code, name=name)
+                    sess = net.join_room(base, code, name=name,
+                                         app_version=upd.VERSION)
                     break
                 except net.NetError as e:
                     last = e
@@ -2183,6 +2196,10 @@ class Game(tk.Tk):
 
         self._btn(pad, 24, 160, 38, "‹  " + t("leave_room"),
                   self.leave_online, "flat", font=("Segoe UI", 11))
+        newer = self._lobby_update_offer()
+        if newer:
+            self._btn(w - pad - 210, 24, 210, 38, t("update_to", newer),
+                      self._lobby_update, "go", font=("Segoe UI Semibold", 11))
         cv.create_text(w / 2, 38, text=t("lobby"), fill=TXT,
                        font=("Segoe UI Semibold", 15))
         pname = st.get("pack_name") or (self.pack.name if self.pack else "")
@@ -2405,6 +2422,47 @@ class Game(tk.Tk):
                 self.msgq.put(("upload_fail", str(ex)))
         threading.Thread(target=work, daemon=True).start()
 
+    def _lobby_update_offer(self):
+        """Neueste App-Version im Raum, falls sie neuer ist als unsere eigene
+        - sonst None. So bekommen Mitspieler die Version des Hosts angeboten."""
+        vers = (self.lobby_state or {}).get("versions") or []
+        newest = None
+        for v in vers:
+            if upd.is_newer(v, upd.VERSION):
+                if newest is None or upd.is_newer(v, newest):
+                    newest = v
+        return newest
+
+    def _lobby_update(self):
+        """Bietet dem Mitspieler an, auf die neueste Version im Raum zu
+        aktualisieren."""
+        if self._net_busy or self.upd_busy:
+            return
+        newer = self._lobby_update_offer()
+        if not newer:
+            return
+        if getattr(sys, "frozen", False):
+            # Die fertige Exe kann sich nicht selbst tauschen -> Download-Seite.
+            messagebox.showinfo(t("title"), t("update_exe", newer))
+            try:
+                webbrowser.open(upd.RELEASES_PAGE)
+            except Exception:
+                pass
+            return
+        # Quelltext-Version: neuestes Release holen und ueber den vorhandenen
+        # Update-Weg einspielen (Download -> pruefen -> tauschen -> Neustart).
+        self._lobby_note = t("update_checking")
+        self.build_lobby()
+
+        def work():
+            try:
+                info = upd.check_latest()
+            except Exception as e:
+                self.msgq.put(("upd_error", "%s" % e))
+                return
+            self.msgq.put(("lobby_upd", info))
+        threading.Thread(target=work, daemon=True).start()
+
     def _copy_invite(self):
         """Legt den Einladungscode in die Zwischenablage."""
         inv = self.online_invite
@@ -2510,6 +2568,13 @@ class Game(tk.Tk):
                     self._lobby_note = t("upload_fail_note", self._upload_fail)
                     if self.screen == "lobby":
                         self.build_lobby()
+                elif kind == "lobby_upd":
+                    self._lobby_note = ""
+                    self.upd_info = payload
+                    self.upd_dismissed = False
+                    # Einspielen ueber den vorhandenen Update-Weg (fragt nach,
+                    # laedt, tauscht Dateien, startet neu).
+                    self._do_update()
                 elif kind == "update":
                     upd.note_checked(self.cfg)
                     self.cfg["upd_cache"] = payload

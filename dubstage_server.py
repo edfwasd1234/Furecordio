@@ -51,7 +51,7 @@ CODE_LEN = 4
 # Zustand / state
 # --------------------------------------------------------------------------
 class Room(object):
-    def __init__(self, code, manifest, host_name):
+    def __init__(self, code, manifest, host_name, host_version=""):
         now = time.time()
         self.code = code
         self.created = now
@@ -62,16 +62,20 @@ class Room(object):
         self.players = {}                    # pid -> {name, token, chars:set}
         self.assign = {}                     # character -> pid
         self.takes = {}                      # clip -> {pid, path, size, ts}
+        self.versions = set()                # App-Versionen im Raum
         self.dir = os.path.join(DATA_DIR, code)
         self.takes_dir = os.path.join(self.dir, "takes")
         self.pack_path = os.path.join(self.dir, "pack.zip")
         os.makedirs(self.takes_dir, exist_ok=True)
-        self.host_pid = self.add_player(host_name)[0]
+        self.host_pid = self.add_player(host_name, host_version)[0]
 
-    def add_player(self, name):
+    def add_player(self, name, version=""):
         pid = _token(6)
         self.players[pid] = {"name": (name or "Player").strip()[:40] or "Player",
                              "token": _token(), "chars": set()}
+        v = str(version or "").strip()[:20]
+        if v:
+            self.versions.add(v)
         self.touch()
         return pid, self.players[pid]
 
@@ -126,6 +130,7 @@ class Room(object):
             "recorded_lines": len(recorded & set(self.line_files())),
             "unassigned_lines": len(unassigned),
             "has_pack": os.path.isfile(self.pack_path),
+            "versions": sorted(self.versions),
         }
 
     def cleanup(self):
@@ -316,9 +321,10 @@ class Handler(BaseHTTPRequestHandler):
             "lines": clean_lines,
         }
         host_name = data.get("host_name", "Host")
+        host_version = data.get("app_version", "")
         with LOCK:
             code = _new_code()
-            room = Room(code, manifest, host_name)
+            room = Room(code, manifest, host_name, host_version)
             ROOMS[code] = room
             host = room.players[room.host_pid]
         return self._send(200, {
@@ -343,7 +349,8 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             if len(room.players) >= MAX_PLAYERS:
                 return self._err(403, "room is full (%d players)" % MAX_PLAYERS)
-            pid, p = room.add_player(data.get("name", "Player"))
+            pid, p = room.add_player(data.get("name", "Player"),
+                                     data.get("app_version", ""))
         return self._send(200, {
             "player_id": pid,
             "token": p["token"],
