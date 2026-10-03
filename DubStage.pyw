@@ -233,6 +233,15 @@ T = {
                    "it over the old one – your packs, recordings and "
                    "settings are kept."),
     "update_checking": ("Suche das Update ...", "Looking for the update ..."),
+    "rollback_to": ("↩  Zurueck auf %s", "↩  Roll back to %s"),
+    "rollback_ask_t": ("Vorherige Version wiederherstellen?",
+                       "Restore the previous version?"),
+    "rollback_ask": ("Zurueck auf Version %s?\n\nDie App schliesst sich, spielt "
+                     "die gesicherte vorherige Fassung wieder ein und startet "
+                     "neu. Packs, Aufnahmen und Einstellungen bleiben erhalten.",
+                     "Roll back to version %s?\n\nThe app closes, restores the "
+                     "saved previous build and restarts. Your packs, recordings "
+                     "and settings are kept."),
     "match": ("Stimme ans Original angleichen (Lautstaerke + Hall)",
               "Match original voice (volume + echo)"),
 
@@ -654,6 +663,18 @@ class Game(tk.Tk):
         self._btn(w - 120, 26, 46, 28, "", lambda: self._set_lang("de"), "flat")
         self._btn(w - 68, 26, 46, 28, "", lambda: self._set_lang("en"), "flat")
 
+        # Zuruecrollen anbieten, wenn eine vorherige Fassung gesichert ist
+        # (nur im fertigen Exe-Build, der sich selbst tauscht).
+        rv = None
+        if getattr(sys, "frozen", False):
+            try:
+                rv = upd.rollback_version(APP_DIR)
+            except Exception:
+                rv = None
+        if rv:
+            self._btn(70, h - 38, 240, 28, t("rollback_to", rv),
+                      self._do_rollback, "flat", font=("Segoe UI", 10))
+
         off = self._draw_update_banner(cv, w, h)
 
         cv.create_text(70, 168 + off, text=t("pick"), fill=TXT, anchor="w",
@@ -904,6 +925,24 @@ class Game(tk.Tk):
                 self.msgq.put(("upd_error", "%s" % e))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _do_rollback(self):
+        rv = None
+        try:
+            rv = upd.rollback_version(APP_DIR)
+        except Exception:
+            rv = None
+        if not rv:
+            return
+        if not messagebox.askyesno(t("rollback_ask_t"), t("rollback_ask", rv)):
+            return
+        try:
+            upd.apply_rollback(APP_DIR)
+        except Exception as e:
+            messagebox.showerror(t("err"), "%s" % e)
+            return
+        self._teardown_host_server()
+        self.after(500, self._on_close)
 
     def _set_lang(self, code):
         if code == LANG:
@@ -2128,6 +2167,9 @@ class Game(tk.Tk):
         name = (self.name_var.get() or "Player").strip() or "Player"
         self.cfg["server_url"] = base
         self.cfg["player_name"] = name
+        if not self.cfg.get("player_key"):
+            self.cfg["player_key"] = os.urandom(8).hex()
+        key = self.cfg["player_key"]
         save_cfg(self.cfg)
         self.online_public = base
         self.online_invite = net.make_invite(base, code)
@@ -2145,7 +2187,7 @@ class Game(tk.Tk):
             while True:
                 try:
                     sess = net.join_room(base, code, name=name,
-                                         app_version=upd.VERSION)
+                                         app_version=upd.VERSION, key=key)
                     break
                 except net.NetError as e:
                     last = e
@@ -2618,7 +2660,9 @@ class Game(tk.Tk):
         def work():
             try:
                 if sess is not None and role == "host":
-                    sess.close_room()
+                    sess.close_room()          # Host beendet den ganzen Raum
+                elif sess is not None:
+                    sess.leave()               # Spieler wirklich austragen
             except Exception:
                 pass
         threading.Thread(target=work, daemon=True).start()

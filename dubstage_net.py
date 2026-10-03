@@ -191,7 +191,15 @@ class Session(object):
 
     # -- Zustand ----------------------------------------------------------
     def state(self):
-        return _request("GET", self._room("state"))
+        # Token mitsenden, damit der Server "ich bin noch da" merkt
+        # (Anwesenheit/Geister-Entfernung).
+        return _request("GET", self._room("state"),
+                        token=self.host_token or self.token)
+
+    def leave(self):
+        """Ausdruecklich aus dem Raum austreten (Figuren werden frei)."""
+        return _request("POST", self._room("leave"),
+                        token=self.token or self.host_token)
 
     # -- Zuordnung / Phase (Host bzw. Selbstwahl) -------------------------
     def set_assignments(self, mapping):
@@ -278,13 +286,18 @@ def create_room(base_url, pack, host_name="Host", upload=True, app_version=""):
     return sess
 
 
-def join_room(base_url, code, name="Player", app_version=""):
-    """Spieler: Raum betreten. Danach download_pack_to(...) aufrufen."""
+def join_room(base_url, code, name="Player", app_version="", key=""):
+    """Spieler: Raum betreten (oder mit key wiederverbinden). Danach
+    download_pack_to(...) aufrufen. Das Ergebnis traegt `reconnected`."""
     base = base_url.rstrip("/")
     body = {"name": name}
     if app_version:
         body["app_version"] = app_version
+    if key:
+        body["key"] = key
     res = _request("POST", "/".join([base, "rooms", code.upper(), "join"]),
                    data=_jbytes(body), ctype="application/json")
-    return Session(base, code.upper(), res["player_id"], res["token"],
+    sess = Session(base, code.upper(), res["player_id"], res["token"],
                    manifest=res.get("manifest", {}))
+    sess.reconnected = bool(res.get("reconnected"))
+    return sess

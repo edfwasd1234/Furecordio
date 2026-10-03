@@ -35,7 +35,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 # ------------------------------------------------------------------ Eckdaten
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 REPO = "edfwasd1234/Furecordio"
 
 API_LATEST = "https://api.github.com/repos/%s/releases/latest" % REPO
@@ -406,12 +406,16 @@ def apply(staged_root, app_dir, which="DubForge", tag=""):
 # ohne /MIR nichts loescht. Nur der reine Programmordner _internal wird
 # gespiegelt (dort liegen keine Benutzerdaten).
 
+BACKUP_DIRNAME = ".backup_prev"
+
+
 PACK_SWAP = r"""@echo off
 setlocal
 set "SRC=__SRC__"
 set "DST=__DST__"
 set "LOG=__LOG__"
 set "STAGE=__STAGE__"
+set "BACKUP=__BACKUP__"
 
 echo ---- Update __TAG__  %DATE% %TIME% > "%LOG%"
 echo Quelle : %SRC% >> "%LOG%"
@@ -421,6 +425,14 @@ rem Kurz warten, damit sich die App schliesst. Danach uebernimmt robocopy das
 rem Warten: gesperrte Dateien werden geduldig wiederholt, bis sie frei sind.
 rem (Keine PID-Pruefung mehr - tasklist/find war unzuverlaessig.)
 ping -n 4 127.0.0.1 >nul
+
+rem Erst die AKTUELLE Fassung sichern, damit man zurueckrollen kann, falls das
+rem Update etwas kaputt macht. Fehler hier brechen das Update nicht ab.
+rmdir /s /q "%BACKUP%" 2>nul
+robocopy "%DST%\_internal" "%BACKUP%\_internal" /MIR /R:3 /W:1 /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1
+robocopy "%DST%" "%BACKUP%" DubStage.exe DubMaker.exe /R:3 /W:1 /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1
+> "%BACKUP%\version.txt" echo __OLDVER__
+echo Sicherung der alten Fassung (__OLDVER__) unter %BACKUP% >> "%LOG%"
 
 rem Programmressourcen spiegeln (enthalten keine Benutzerdaten). /R:120 /W:1 =
 rem bis zu 120 s je noch gesperrter Datei abwarten. /IS /IT erzwingen das
@@ -488,11 +500,14 @@ def apply_packaged(staged_root, app_dir, tag="", stage_dir=None):
     log = os.path.join(tmp, "dubstage_update_%s.log" % stamp)
     bat = os.path.join(tmp, "dubstage_update_%s.bat" % stamp)
 
+    backup = os.path.join(app_dir.rstrip("\\/"), BACKUP_DIRNAME)
     text = (PACK_SWAP
             .replace("__SRC__", staged_root.rstrip("\\/"))
             .replace("__DST__", app_dir.rstrip("\\/"))
             .replace("__LOG__", log)
             .replace("__STAGE__", (stage_dir or staged_root).rstrip("\\/"))
+            .replace("__BACKUP__", backup)
+            .replace("__OLDVER__", VERSION)
             .replace("__TAG__", tag or "?"))
 
     with io.open(bat, "w", encoding="cp1252", errors="replace",
@@ -501,6 +516,70 @@ def apply_packaged(staged_root, app_dir, tag="", stage_dir=None):
 
     # Ohne sichtbares Konsolenfenster und losgeloest vom Elternprozess, damit
     # der Helfer weiterlaeuft, nachdem sich die App beendet hat.
+    flags = 0x08000000 | 0x00000200          # CREATE_NO_WINDOW | NEW_GROUP
+    subprocess.Popen([os.environ.get("COMSPEC", "cmd.exe"), "/c", bat],
+                     cwd=tmp, close_fds=True, creationflags=flags)
+    return log
+
+
+# ==========================================================================
+#  Zuruueckrollen auf die zuvor gesicherte Fassung (Exe-Build)
+# ==========================================================================
+ROLLBACK_SWAP = r"""@echo off
+setlocal
+set "BACKUP=__BACKUP__"
+set "DST=__DST__"
+set "LOG=__LOG__"
+
+echo ---- Rollback %DATE% %TIME% > "%LOG%"
+ping -n 4 127.0.0.1 >nul
+
+robocopy "%BACKUP%\_internal" "%DST%\_internal" /MIR /IS /IT /R:120 /W:1 /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1
+set "RC1=%ERRORLEVEL%"
+robocopy "%BACKUP%" "%DST%" DubStage.exe DubMaker.exe /IS /IT /R:120 /W:1 /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1
+set "RC2=%ERRORLEVEL%"
+echo rollback _internal=%RC1% exe=%RC2% >> "%LOG%"
+
+start "" "%DST%\DubStage.exe"
+endlocal
+(goto) 2>nul & del "%~f0"
+"""
+
+
+def rollback_version(app_dir):
+    """Version der gesicherten Vorgaenger-Fassung, oder None wenn es keine
+    gibt (dann ist kein Zuruecrollen moeglich)."""
+    backup = os.path.join(app_dir, BACKUP_DIRNAME)
+    if not os.path.isfile(os.path.join(backup, "DubStage.exe")):
+        return None
+    try:
+        with io.open(os.path.join(backup, "version.txt"), "r",
+                     encoding="utf-8", errors="replace") as f:
+            v = f.read().strip()
+        return v or "?"
+    except Exception:
+        return "?"
+
+
+def apply_rollback(app_dir):
+    """Die gesicherte Vorgaenger-Fassung wieder einspielen. Die App muss sich
+    danach beenden."""
+    if os.name != "nt":
+        raise UpdateError("Rollback ist nur unter Windows vorgesehen.")
+    backup = os.path.join(app_dir, BACKUP_DIRNAME)
+    if not os.path.isfile(os.path.join(backup, "DubStage.exe")):
+        raise UpdateError("Keine gesicherte Vorgaenger-Fassung vorhanden.")
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    tmp = tempfile.gettempdir()
+    log = os.path.join(tmp, "dubstage_rollback_%s.log" % stamp)
+    bat = os.path.join(tmp, "dubstage_rollback_%s.bat" % stamp)
+    text = (ROLLBACK_SWAP
+            .replace("__BACKUP__", backup.rstrip("\\/"))
+            .replace("__DST__", app_dir.rstrip("\\/"))
+            .replace("__LOG__", log))
+    with io.open(bat, "w", encoding="cp1252", errors="replace",
+                 newline="\r\n") as f:
+        f.write(text)
     flags = 0x08000000 | 0x00000200          # CREATE_NO_WINDOW | NEW_GROUP
     subprocess.Popen([os.environ.get("COMSPEC", "cmd.exe"), "/c", bat],
                      cwd=tmp, close_fds=True, creationflags=flags)

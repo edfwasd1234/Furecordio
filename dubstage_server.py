@@ -37,6 +37,10 @@ PORT = int(os.environ.get("PORT", "8000"))
 DATA_DIR = os.environ.get("DUBSTAGE_DATA",
                           os.path.join(tempfile.gettempdir(), "dubstage_server"))
 ROOM_TTL = int(os.environ.get("DUBSTAGE_ROOM_TTL", str(6 * 3600)))   # 6 h
+# Spieler, die sich so lange nicht gemeldet haben, gelten als weg und werden
+# aus der Lobby entfernt (Figuren wieder frei). AWAY = noch "da, aber still".
+PLAYER_TTL = int(os.environ.get("DUBSTAGE_PLAYER_TTL", "40"))
+PLAYER_AWAY = int(os.environ.get("DUBSTAGE_PLAYER_AWAY", "12"))
 MAX_PLAYERS = int(os.environ.get("DUBSTAGE_MAX_PLAYERS", "10"))      # inkl. Host
 MAX_PACK = int(os.environ.get("DUBSTAGE_MAX_PACK", str(300 * 1024 * 1024)))
 MAX_TAKE = int(os.environ.get("DUBSTAGE_MAX_TAKE", str(25 * 1024 * 1024)))
@@ -69,15 +73,56 @@ class Room(object):
         os.makedirs(self.takes_dir, exist_ok=True)
         self.host_pid = self.add_player(host_name, host_version)[0]
 
-    def add_player(self, name, version=""):
+    def add_player(self, name, version="", key=""):
         pid = _token(6)
         self.players[pid] = {"name": (name or "Player").strip()[:40] or "Player",
-                             "token": _token(), "chars": set()}
+                             "token": _token(), "chars": set(),
+                             "key": str(key or "")[:64],
+                             "last_seen": time.time()}
         v = str(version or "").strip()[:20]
         if v:
             self.versions.add(v)
         self.touch()
         return pid, self.players[pid]
+
+    def find_by_key(self, key):
+        """pid eines bereits bekannten Spielers mit diesem Wiederverbindungs-
+        Schluessel - fuer die Rueckkehr nach einem Absturz/Neustart."""
+        key = str(key or "")
+        if not key:
+            return None
+        for pid, p in self.players.items():
+            if p.get("key") and p.get("key") == key:
+                return pid
+        return None
+
+    def seen(self, pid):
+        p = self.players.get(pid)
+        if p:
+            p["last_seen"] = time.time()
+
+    def remove_player(self, pid):
+        """Spieler entfernen und seine Figuren wieder freigeben. Der Host wird
+        so nie entfernt (der Host beendet den Raum ueber DELETE)."""
+        if pid == self.host_pid or pid not in self.players:
+            return False
+        self.players.pop(pid, None)
+        for ch in [c for c, q in list(self.assign.items()) if q == pid]:
+            self.assign.pop(ch, None)
+        self.touch()
+        return True
+
+    def prune_players(self, ttl):
+        """Spieler entfernen, die sich seit ttl Sekunden nicht mehr gemeldet
+        haben (App zu/abgestuerzt), damit sie nicht als Geister haengen und
+        ihre Figuren wieder frei werden. Host bleibt immer."""
+        now = time.time()
+        dead = [pid for pid, p in self.players.items()
+                if pid != self.host_pid
+                and (now - p.get("last_seen", now)) > ttl]
+        for pid in dead:
+            self.remove_player(pid)
+        return dead
 
     def touch(self):
         self.touched = time.time()
@@ -98,6 +143,7 @@ class Room(object):
                 if ln.get("character", "") in mine]
 
     def public_state(self):
+        now = time.time()
         recorded = set(self.takes.keys())
         lines = self.manifest.get("lines", [])
         total = len(lines)
@@ -110,6 +156,7 @@ class Room(object):
                 "id": pid,
                 "name": p["name"],
                 "is_host": pid == self.host_pid,
+                "online": (now - p.get("last_seen", now)) < PLAYER_AWAY,
                 "characters": sorted(c for c, q in self.assign.items()
                                      if q == pid),
                 "assigned": len(mine),
@@ -268,12 +315,21 @@ class Handler(BaseHTTPRequestHandler):
             room.touch()
             sub = parts[2] if len(parts) > 2 else ""
 
-            if sub == "" and method == "GET":
+            if sub in ("", "state") and method == "GET":
+                # Anwesenheit pflegen: wer gerade pollt, ist "da"; wer lange
+                # weg ist, wird entfernt (kein Geist, Figur wird frei).
+                with LOCK:
+                    who = self._requester_pid(room)
+                    if who == "*host*":
+                        who = room.host_pid
+                    if who:
+                        room.seen(who)
+                    room.prune_players(PLAYER_TTL)
                 return self._send(200, room.public_state())
             if sub == "" and method == "DELETE":
                 return self._delete_room(room)
-            if sub == "state" and method == "GET":
-                return self._send(200, room.public_state())
+            if sub == "leave" and method == "POST":
+                return self._leave(room)
             if sub == "join" and method == "POST":
                 return self._join(room)
             if sub == "assign" and method == "POST":
@@ -346,17 +402,43 @@ class Handler(BaseHTTPRequestHandler):
         data = self._json_body()
         if data is None:
             return self._err(400, "bad json")
+        key = data.get("key", "")
+        version = str(data.get("app_version", "")).strip()[:20]
         with LOCK:
-            if len(room.players) >= MAX_PLAYERS:
-                return self._err(403, "room is full (%d players)" % MAX_PLAYERS)
-            pid, p = room.add_player(data.get("name", "Player"),
-                                     data.get("app_version", ""))
+            existing = room.find_by_key(key)
+            if existing:
+                # Wiederverbindung: gleiche Identitaet + Figuren behalten.
+                pid = existing
+                p = room.players[pid]
+                p["last_seen"] = time.time()
+                if data.get("name"):
+                    p["name"] = str(data["name"]).strip()[:40] or p["name"]
+                reconnected = True
+            else:
+                if len(room.players) >= MAX_PLAYERS:
+                    return self._err(403,
+                                     "room is full (%d players)" % MAX_PLAYERS)
+                pid, p = room.add_player(data.get("name", "Player"),
+                                         version, key)
+                reconnected = False
+            if version:
+                room.versions.add(version)
         return self._send(200, {
             "player_id": pid,
             "token": p["token"],
+            "reconnected": reconnected,
             "manifest": room.manifest,
             "state": room.public_state(),
         })
+
+    def _leave(self, room):
+        """Spieler verlaesst den Raum ausdruecklich -> sofort entfernen und
+        seine Figuren freigeben. (Host-Token: der Host beendet ueber DELETE.)"""
+        who = self._requester_pid(room)
+        if who not in (None, "*host*"):
+            with LOCK:
+                room.remove_player(who)
+        return self._send(200, {"ok": True})
 
     def _requester_pid(self, room):
         tok = self._token_hdr()

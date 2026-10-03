@@ -9,6 +9,24 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 Nothing yet.
 
+## [1.3.0] - 2026-10-03
+
+### Added
+
+- **Reconnect to a room.** Each player keeps a stable key, so if your app
+  closes or crashes you can rejoin the same room and keep your claimed
+  characters and recordings.
+- **Roll back an update.** Each packaged update now snapshots the previous build
+  first; a "Roll back to vX" button on the menu restores it and relaunches if an
+  update ever breaks something. Your packs, recordings and settings are kept.
+- **DubMaker updates itself too**, the same way DubStage does.
+
+### Fixed
+
+- **Leaving a room actually removes you.** Players who leave (or whose app
+  closes) are dropped from the lobby and their character is freed for others,
+  instead of lingering as a "ghost" that blocked the character.
+
 ## [1.2.1] - 2026-10-02
 
 ### Fixed

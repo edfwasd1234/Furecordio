@@ -28,6 +28,7 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dubforge_core as pc
 import dubstage_core as ds
+import updater as upd
 
 try:
     from PIL import Image, ImageTk
@@ -116,6 +117,20 @@ T = {
     "unassigned": ("ohne Figur", "unassigned"),
     "no_pil":    ("Videoanzeige braucht 'Pillow'. Bitte Setup.bat ausfuehren.",
                   "Video display needs 'Pillow'. Please run Setup.bat."),
+    # --- Update
+    "upd_head":  ("Version %s ist da", "Version %s is out"),
+    "upd_ask":   ("Jetzt auf %s aktualisieren?\n\nDubMaker und DubStage werden "
+                  "getauscht und die App startet neu. Packs, Aufnahmen und "
+                  "Einstellungen bleiben erhalten.",
+                  "Update to %s now?\n\nDubMaker and DubStage are replaced and "
+                  "the app restarts. Your packs, recordings and settings are "
+                  "kept."),
+    "upd_ask_page": ("Eine neue Version ist da. Download-Seite oeffnen?",
+                     "A new version is available. Open the download page?"),
+    "upd_dl":    ("Lade Update ... %d%%", "Downloading update ... %d%%"),
+    "upd_swap":  ("Tausche Dateien - gleich geht es weiter ...",
+                  "Replacing files - back in a moment ..."),
+    "upd_fail_t": ("Update fehlgeschlagen", "Update failed"),
 }
 
 
@@ -297,8 +312,10 @@ class DubMaker(tk.Tk):
 
         self._style()
         self._resize_job = None
+        self._upd_busy = False
         self.after(50, self.build_ui)
         self.after(60, self._pump)
+        self.after(1700, self._check_update)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _style(self):
@@ -1186,9 +1203,80 @@ class DubMaker(tk.Tk):
                     self._busy = False
                     messagebox.showerror(t("err"), payload)
                     self._set_status("")
+                elif kind == "update":
+                    self._prompt_update(payload)
+                elif kind == "upd_status":
+                    self._set_status(payload)
+                elif kind == "upd_quit":
+                    self.after(500, self._on_close)
+                elif kind == "upd_error":
+                    self._upd_busy = False
+                    messagebox.showerror(t("upd_fail_t"), payload)
         except queue.Empty:
             pass
         self.after(60, self._pump)
+
+    # ------------------------------------------------------------ Update
+    def _check_update(self):
+        if not upd.due(self.cfg):
+            return
+        upd.note_checked(self.cfg)
+        save_cfg(self.cfg)
+
+        def work():
+            try:
+                info = upd.check_latest()
+            except Exception:
+                return
+            if info.get("newer"):
+                self.msgq.put(("update", info))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _prompt_update(self, info):
+        if self._upd_busy:
+            return
+        frozen = getattr(sys, "frozen", False)
+        ver = info.get("version", "?")
+        if frozen and not info.get("asset"):
+            if messagebox.askyesno(t("upd_head", ver), t("upd_ask_page")):
+                try:
+                    import webbrowser
+                    webbrowser.open(info.get("page") or upd.RELEASES_PAGE)
+                except Exception:
+                    pass
+            return
+        if not frozen and not info.get("zip"):
+            return
+        if not messagebox.askyesno(t("upd_head", ver), t("upd_ask", ver)):
+            return
+        self._upd_busy = True
+        self._set_status(t("upd_dl", 0))
+
+        def work():
+            wd = tempfile.mkdtemp(prefix="dubmaker_upd_")
+            try:
+                def prog(done, total):
+                    pct = int(done * 100 / total) if total else 0
+                    self.msgq.put(("upd_status", t("upd_dl", pct)))
+                if frozen:
+                    zp = os.path.join(wd, "build.zip")
+                    upd.download_zip(info["asset"], zp, progress=prog,
+                                     max_bytes=upd.MAX_ASSET)
+                    self.msgq.put(("upd_status", t("upd_swap")))
+                    root = upd.stage_packaged(zp, os.path.join(wd, "neu"))
+                    upd.apply_packaged(root, APP_DIR,
+                                       tag=info.get("tag", ""), stage_dir=wd)
+                else:
+                    zp = os.path.join(wd, "release.zip")
+                    upd.download_zip(info["zip"], zp, progress=prog)
+                    self.msgq.put(("upd_status", t("upd_swap")))
+                    root = upd.stage(zp, os.path.join(wd, "neu"))
+                    upd.apply(root, APP_DIR, which="DubMaker",
+                              tag=info.get("tag", ""))
+                self.msgq.put(("upd_quit", None))
+            except Exception as e:
+                self.msgq.put(("upd_error", "%s" % e))
+        threading.Thread(target=work, daemon=True).start()
 
     def _on_close(self):
         try:
