@@ -1379,8 +1379,35 @@ def _selftest_demucs():
         pass
 
 
+def _selftest_stt():
+    """Prueft im gebauten Exe, ob die Spracherkennung (faster-whisper samt
+    nativen Bibliotheken) laedt. DUBMAKER_SELFTEST=stt; keine GUI, kein Netz."""
+    result = os.path.join(APP_DIR, "selftest_stt.txt")
+    try:
+        import dubstage_stt as _stt
+        import faster_whisper          # noqa: F401
+        import ctranslate2             # laedt die native DLL
+        import av                      # laedt die PyAV-Bibliotheken
+        ok = _stt.available()
+        msg = ("OK  faster_whisper=%s ct2=%s av=%s available=%s"
+               % (getattr(faster_whisper, "__version__", "?"),
+                  getattr(ctranslate2, "__version__", "?"),
+                  getattr(av, "__version__", "?"), ok))
+    except Exception as e:
+        msg = "ERROR: %r" % e
+    try:
+        with open(result, "w", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
-    if os.environ.get("DUBMAKER_SELFTEST") == "demucs":
+    _st = os.environ.get("DUBMAKER_SELFTEST")
+    if _st == "demucs":
         _selftest_demucs()
+        raise SystemExit(0)
+    if _st == "stt":
+        _selftest_stt()
         raise SystemExit(0)
     DubMaker().mainloop()
