@@ -28,6 +28,7 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dubforge_core as pc
 import dubstage_core as ds
+import dubstage_stt as stt
 import updater as upd
 
 try:
@@ -92,6 +93,16 @@ T = {
     "subtitle":  ("Untertitel", "Subtitle"),
     "sub_hint":  ("Enter = speichern und zum naechsten Bereich",
                   "Enter = save and go to the next region"),
+    "cap":       ("✨ Auto-Untertitel", "✨ Auto-captions"),
+    "cap_need_lib": ("Auto-Untertitel brauchen die Sprachbibliothek "
+                     "(faster-whisper). Bitte Setup.bat ausfuehren.",
+                     "Auto-captions need the speech library (faster-whisper). "
+                     "Please run Setup.bat."),
+    "cap_first": ("Sprachmodell wird einmalig geladen (~150 MB) ...",
+                  "Downloading the speech model once (~150 MB) ..."),
+    "cap_run":   ("Untertitel %d / %d ...", "Transcribing %d / %d ..."),
+    "cap_done":  ("Fertig: %d Untertitel erzeugt.",
+                  "Done: filled %d captions."),
     "pick_char": ("Erst eine Figur waehlen (links).",
                   "Pick a character first (left)."),
     "region_of": ("Bereich %d / %d  -  %s", "Region %d / %d  -  %s"),
@@ -478,10 +489,14 @@ class DubMaker(tk.Tk):
                                   font=("Segoe UI", 12), highlightthickness=1,
                                   highlightbackground=EDGE, highlightcolor=ACC)
         self._embedded.append(self.sub_entry)
+        cap_w = 168
         cv.create_window(rx0 + 90, sy, window=self.sub_entry, anchor="w",
-                         width=rw - 90, height=30)
+                         width=max(140, rw - 90 - cap_w - 12), height=30)
         self.sub_entry.bind("<Return>", self._sub_next)
         self.sub_entry.bind("<FocusOut>", lambda e: self._sub_save())
+        # Alle Untertitel automatisch per Spracherkennung fuellen.
+        self._btn(rx1 - cap_w, sy - 17, cap_w, 34, t("cap"),
+                  self.auto_captions, "ghost", font=("Segoe UI Semibold", 10))
         self.sel_info = cv.create_text(rx0, sy + 30, anchor="w",
                                        text=t("no_region"), fill=DIM,
                                        font=("Segoe UI", 10))
@@ -860,6 +875,48 @@ class DubMaker(tk.Tk):
             self.sel = None
             self.build_ui()
 
+    def auto_captions(self):
+        """Fuellt die Untertitel aller Bereiche per Spracherkennung (Whisper).
+        Das Modell wird beim ersten Mal einmalig geladen."""
+        if self._busy or self._upd_busy:
+            return
+        if not self.regions:
+            self._set_status(t("need_regions"))
+            return
+        if not stt.available():
+            messagebox.showinfo(t("title"), t("cap_need_lib"))
+            return
+        src = self.voc_audio if self.voc_audio is not None else self.play_audio
+        if src is None:
+            self._set_status(t("err"))
+            return
+        regions = list(self.regions)
+        first = not stt.model_present()
+        self._busy = True
+        if first:
+            self._set_status(t("cap_first"))
+
+        def work():
+            total = len(regions)
+            n = 0
+            for i, r in enumerate(regions):
+                self.msgq.put(("cap_run", (i + 1, total, first)))
+                a = max(0, int(r["start"] * PSR))
+                b = min(len(src), int(r["end"] * PSR))
+                if b <= a:
+                    continue
+                try:
+                    txt = stt.transcribe(src[a:b], PSR)
+                except Exception as e:
+                    self.msgq.put(("error", "%s" % e))
+                    self.msgq.put(("cap_fail", None))
+                    return
+                if txt:
+                    r["caption"] = txt
+                    n += 1
+            self.msgq.put(("cap_fill", n))
+        threading.Thread(target=work, daemon=True).start()
+
     def auto_detect(self):
         if self.data8 is None:
             return
@@ -1203,6 +1260,16 @@ class DubMaker(tk.Tk):
                     self._busy = False
                     messagebox.showerror(t("err"), payload)
                     self._set_status("")
+                elif kind == "cap_run":
+                    i, total, first = payload
+                    self._set_status(t("cap_first") if first and i == 1
+                                     else t("cap_run", i, total))
+                elif kind == "cap_fill":
+                    self._busy = False
+                    self.build_ui()
+                    self._set_status(t("cap_done", payload))
+                elif kind == "cap_fail":
+                    self._busy = False
                 elif kind == "update":
                     self._prompt_update(payload)
                 elif kind == "upd_status":

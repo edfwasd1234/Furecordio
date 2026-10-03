@@ -43,6 +43,14 @@ echo [2/4] Python-Pakete installieren ^(numpy, yt-dlp, pillow, sounddevice^) ...
 echo       ok
 echo       ^(pillow und sounddevice werden fuer DubStage gebraucht^)
 echo.
+echo       Auto-Untertitel ^(Spracherkennung^) ...
+%PY% -m pip install --upgrade faster-whisper
+if errorlevel 1 (
+  echo [!] faster-whisper nicht installiert - Auto-Untertitel sind dann aus.
+) else (
+  echo       ok ^(Sprachmodell wird beim ersten Mal geladen^)
+)
+echo.
 
 echo [3/4] Demucs fuer die Stimmen-Trennung ...
 echo       Achtung: laedt PyTorch, das sind mehrere hundert MB bis ~2 GB.

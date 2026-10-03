@@ -4,9 +4,12 @@
 from PyInstaller.utils.hooks import collect_all
 
 # Bundle everything the apps need at runtime, incl. Demucs + PyTorch for the
-# optional backing-track (vocal) separation.
+# optional backing-track (vocal) separation, and faster-whisper for the
+# automatic subtitles (the speech MODEL itself is downloaded on first use).
 _pkgs = ["sounddevice", "demucs", "torch", "soundfile", "sphn",
-         "safetensors", "lameenc", "julius", "einops"]
+         "safetensors", "lameenc", "julius", "einops",
+         "faster_whisper", "ctranslate2", "tokenizers", "huggingface_hub",
+         "av"]
 _datas, _binaries, _hidden = [], [], []
 for _p in _pkgs:
     _d, _b, _h = collect_all(_p)
@@ -21,7 +24,9 @@ _common = dict(
     hiddenimports=["numpy", "PIL", "PIL.ImageTk", "demucs.separate"] + _hidden,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["matplotlib", "IPython", "torchvision", "torchaudio"],
+    # onnxruntime nur fuer die (ungenutzte) VAD-Funktion -> spart Platz.
+    excludes=["matplotlib", "IPython", "torchvision", "torchaudio",
+              "onnxruntime"],
     noarchive=False,
 )
 

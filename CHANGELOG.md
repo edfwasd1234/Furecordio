@@ -9,6 +9,16 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 Nothing yet.
 
+## [1.4.0] - 2026-10-03
+
+### Added
+
+- **Auto-captions in DubMaker.** An "✨ Auto-captions" button transcribes every
+  region's audio and fills the subtitles for you (faster-whisper). The speech
+  model is downloaded once on first use (~150 MB) into `models/` next to the
+  app, so the download stays small and it works offline afterwards. If the
+  speech library is missing (source install), it points you to Setup.bat.
+
 ## [1.3.0] - 2026-10-03
 
 ### Added
