@@ -4,11 +4,8 @@ dubs/
 tools/
 online_packs/
 models/
-dist2/
-dist3/
-build_pyi_test/
-build_pyi2/
-build_pyi3/
+dist*/
+build_pyi*/
 test_update_v110/
 
 # Build-Artefakte (PyInstaller) / build artifacts
