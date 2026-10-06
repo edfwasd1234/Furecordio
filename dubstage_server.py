@@ -27,8 +27,52 @@ import threading
 import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
+
+# Web-Spieler (HTML/JS fuer Handys). Im Exe-Build liegt er im entpackten
+# Bundle (_MEIPASS), sonst neben dieser Datei.
+WEB_DIR = os.path.join(getattr(sys, "_MEIPASS",
+                               os.path.dirname(os.path.abspath(__file__))),
+                       "web")
+
+CTYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".mkv": "video/x-matroska",
+    ".ogv": "video/ogg",
+    ".avi": "video/x-msvideo",
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".ogg": "audio/ogg",
+    ".flac": "audio/flac",
+}
+VIDEO_NAMES = ("dub_video.mp4", "dub_video.webm", "dub_video.mov",
+               "dub_video.mkv", "dub_video.ogv", "dub_video.avi")
+
+
+def _ctype(name):
+    return CTYPES.get(os.path.splitext(name)[1].lower(),
+                      "application/octet-stream")
+
+
+def _wav_dur(path):
+    """Laenge eines PCM-WAVs in Sekunden (ohne ffmpeg) oder None."""
+    import wave
+    try:
+        with wave.open(path, "rb") as w:
+            return w.getnframes() / float(w.getframerate() or 1)
+    except Exception:
+        return None
 
 # --------------------------------------------------------------------------
 # Konfiguration / configuration (per Umgebungsvariablen ueberschreibbar)
@@ -39,7 +83,8 @@ DATA_DIR = os.environ.get("DUBSTAGE_DATA",
 ROOM_TTL = int(os.environ.get("DUBSTAGE_ROOM_TTL", str(6 * 3600)))   # 6 h
 # Spieler, die sich so lange nicht gemeldet haben, gelten als weg und werden
 # aus der Lobby entfernt (Figuren wieder frei). AWAY = noch "da, aber still".
-PLAYER_TTL = int(os.environ.get("DUBSTAGE_PLAYER_TTL", "40"))
+# 90 s: Handys pausieren das Pollen, wenn der Bildschirm kurz gesperrt ist.
+PLAYER_TTL = int(os.environ.get("DUBSTAGE_PLAYER_TTL", "90"))
 PLAYER_AWAY = int(os.environ.get("DUBSTAGE_PLAYER_AWAY", "12"))
 MAX_PLAYERS = int(os.environ.get("DUBSTAGE_MAX_PLAYERS", "10"))      # inkl. Host
 MAX_PACK = int(os.environ.get("DUBSTAGE_MAX_PACK", str(300 * 1024 * 1024)))
@@ -70,6 +115,8 @@ class Room(object):
         self.dir = os.path.join(DATA_DIR, code)
         self.takes_dir = os.path.join(self.dir, "takes")
         self.pack_path = os.path.join(self.dir, "pack.zip")
+        self.files_dir = os.path.join(self.dir, "pack")   # entpackt (Web)
+        self.info = None                     # {video, backing, lines[dur]}
         os.makedirs(self.takes_dir, exist_ok=True)
         self.host_pid = self.add_player(host_name, host_version)[0]
 
@@ -177,8 +224,37 @@ class Room(object):
             "recorded_lines": len(recorded & set(self.line_files())),
             "unassigned_lines": len(unassigned),
             "has_pack": os.path.isfile(self.pack_path),
+            "recorded_clips": sorted(recorded & set(self.line_files())),
             "versions": sorted(self.versions),
         }
+
+    def extract_pack(self):
+        """Pack-Zip flach entpacken, damit der Web-Spieler einzelne Dateien
+        (Video, Clips) streamen kann, und Zeilenlaengen ermitteln."""
+        shutil.rmtree(self.files_dir, ignore_errors=True)
+        os.makedirs(self.files_dir, exist_ok=True)
+        with zipfile.ZipFile(self.pack_path) as z:
+            for zi in z.infolist():
+                name = os.path.basename(zi.filename)   # kein Pfad-Ausbruch
+                if not name or zi.is_dir():
+                    continue
+                with z.open(zi) as src, \
+                        open(os.path.join(self.files_dir, name), "wb") as out:
+                    shutil.copyfileobj(src, out, 1024 * 1024)
+        files = set(os.listdir(self.files_dir))
+        video = next((v for v in VIDEO_NAMES if v in files), None)
+        backing = next((f for f in sorted(files)
+                        if f.lower().startswith("_backing_track")
+                        and f.lower().endswith(".wav")), None)
+        lines = []
+        for ln in self.manifest.get("lines", []):
+            d = _wav_dur(os.path.join(self.files_dir, ln["file"]))
+            item = dict(ln)
+            item["dur"] = round(d, 3) if d else 3.0
+            lines.append(item)
+        self.info = {"video": video, "backing": backing, "lines": lines,
+                     "characters": self.manifest.get("characters", []),
+                     "name": self.manifest.get("name", "")}
 
     def cleanup(self):
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -263,6 +339,50 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(raw)
 
+    def _send_file(self, path, ctype, cache="no-cache"):
+        """Datei streamen, mit HTTP-Range (206). Ohne Range spielt iOS-Safari
+        kein Video ab; ausserdem laedt so niemand das ganze Video vorab."""
+        size = os.path.getsize(path)
+        start, end, status = 0, size - 1, 200
+        rng = (self.headers.get("Range") or "").strip()
+        m = re.match(r"^bytes=(\d*)-(\d*)$", rng)
+        if m and size > 0:
+            s, e = m.group(1), m.group(2)
+            if s == "" and e:                         # letzte n Bytes
+                start = max(0, size - int(e))
+            else:
+                start = int(s or 0)
+                if e:
+                    end = min(int(e), size - 1)
+            if start >= size or start > end:
+                self.send_response(416)
+                self.send_header("Content-Range", "bytes */%d" % size)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            status = 206
+        length = end - start + 1 if size else 0
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if status == 206:
+            self.send_header("Content-Range",
+                             "bytes %d-%d/%d" % (start, end, size))
+        self.send_header("Cache-Control", cache)
+        self.end_headers()
+        if self.command == "HEAD" or not length:
+            return
+        with open(path, "rb") as f:
+            f.seek(start)
+            left = length
+            while left > 0:
+                chunk = f.read(min(256 * 1024, left))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                left -= len(chunk)
+
     def _err(self, code, msg):
         self._send(code, {"error": msg})
 
@@ -291,13 +411,18 @@ class Handler(BaseHTTPRequestHandler):
     def _route(self, method):
         try:
             path = self.path.split("?", 1)[0].rstrip("/")
-            parts = [p for p in path.split("/") if p]
+            parts = [unquote(p) for p in path.split("/") if p]
             if not parts:
                 return self._send(200, {"ok": True, "service": "dubstage",
                                         "version": VERSION,
                                         "rooms": len(ROOMS)})
             if parts[0] == "health":
                 return self._send(200, {"ok": True, "rooms": len(ROOMS)})
+            # Web-Spieler: /r/CODE oeffnet die Handy-Seite, /web/... Dateien
+            if parts[0] == "r" and method == "GET":
+                return self._web("index.html")
+            if parts[0] == "web" and len(parts) == 2 and method == "GET":
+                return self._web(parts[1])
             if parts[0] != "rooms":
                 return self._err(404, "not found")
 
@@ -340,13 +465,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._upload_pack(room)
             if sub == "pack" and method == "GET":
                 return self._download_pack(room)
+            if sub == "info" and method == "GET":
+                return self._room_info(room)
+            if sub == "files" and len(parts) == 4 and method == "GET":
+                return self._room_file(room, parts[3])
             if sub == "takes" and method == "GET":
                 return self._download_takes(room)
             if sub == "takes" and len(parts) == 4 and method == "POST":
                 return self._upload_take(room, parts[3])
             return self._err(404, "not found")
-        except BrokenPipeError:
-            pass
+        except (BrokenPipeError, ConnectionError):
+            pass                              # Client hat abgebrochen (normal)
         except Exception as exc:              # nie den Server umbringen
             try:
                 self._err(500, "server error: %s" % exc)
@@ -500,7 +629,36 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(400, "expected a zip")
         with open(room.pack_path, "wb") as f:
             f.write(raw)
+        try:
+            room.extract_pack()
+        except Exception as exc:
+            return self._err(400, "bad pack zip: %s" % exc)
         return self._send(200, {"ok": True, "size": len(raw)})
+
+    def _room_info(self, room):
+        if room.info is None:
+            return self._err(404, "no pack uploaded yet")
+        return self._send(200, room.info)
+
+    def _room_file(self, room, name):
+        """Einzelne Pack-Datei fuer den Web-Spieler (mit Range-Support)."""
+        if (not name or name != os.path.basename(name)
+                or name.startswith(".")):
+            return self._err(400, "bad name")
+        path = os.path.join(room.files_dir, name)
+        if not os.path.isfile(path):
+            return self._err(404, "no such file")
+        return self._send_file(path, _ctype(name), cache="public, max-age=3600")
+
+    def _web(self, name):
+        """Statische Dateien des Web-Spielers."""
+        if (not name or name != os.path.basename(name)
+                or name.startswith(".")):
+            return self._err(400, "bad name")
+        path = os.path.join(WEB_DIR, name)
+        if not os.path.isfile(path):
+            return self._err(404, "web player missing (%s)" % name)
+        return self._send_file(path, _ctype(name), cache="no-cache")
 
     def _download_pack(self, room):
         if not os.path.isfile(room.pack_path):

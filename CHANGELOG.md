@@ -9,6 +9,28 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 Nothing yet.
 
+## [1.5.0] - 2026-10-05
+
+### Added
+
+- **Play on a phone - no app needed.** When you host, your PC now also serves a
+  web version of the player side. Phones open the invite link (or scan the QR
+  code from the new **📱 Phones** button in the lobby), join, claim a
+  character and record their lines right in the browser. Takes are encoded as
+  the same WAV the desktop records, so they assemble exactly like desktop
+  takes. Phone and desktop players mix freely in one room. Reconnects after a
+  reload or a locked screen keep the phone's character.
+- **One invite link for everyone.** The lobby's Copy button now copies a link
+  (`https://.../r/CODE`) that works on phones and in the desktop app's invite
+  box. The old invite code still works ("Code for older desktop apps").
+- The relay streams pack files individually with HTTP Range support (needed
+  for video on iPhone Safari).
+
+### Changed
+
+- Players now stay in a room for 90 s without a sign of life (was 40 s), so a
+  phone whose screen locks briefly doesn't lose its character.
+
 ## [1.4.0] - 2026-10-03
 
 ### Added

@@ -20,8 +20,10 @@ for _p in _pkgs:
 _common = dict(
     pathex=["."],
     binaries=[("tools/ffmpeg.exe", "tools")] + _binaries,
-    datas=_datas,
-    hiddenimports=["numpy", "PIL", "PIL.ImageTk", "demucs.separate"] + _hidden,
+    # web/ = der Web-Spieler fuer Handys, den der Host-Relay ausliefert
+    datas=[("web", "web")] + _datas,
+    hiddenimports=["numpy", "PIL", "PIL.ImageTk", "demucs.separate",
+                   "qrcode", "qrcode.constants"] + _hidden,
     hookspath=[],
     runtime_hooks=[],
     # onnxruntime nur fuer die (ungenutzte) VAD-Funktion -> spart Platz.

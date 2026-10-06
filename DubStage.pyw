@@ -41,6 +41,19 @@ try:
 except Exception:
     HAVE_PIL = False
 
+
+def qr_matrix(text):
+    """QR-Code als Bool-Matrix (inkl. Rand) oder None, wenn 'qrcode' fehlt."""
+    try:
+        import qrcode
+        q = qrcode.QRCode(border=2,
+                          error_correction=qrcode.constants.ERROR_CORRECT_M)
+        q.add_data(text)
+        q.make(fit=True)
+        return q.get_matrix()
+    except Exception:
+        return None
+
 # ------------------------------------------------------------------ Palette
 BG_TOP = "#171a2e"
 BG_BOT = "#0a0b12"
@@ -164,9 +177,10 @@ T = {
     "adv_hide":   ("Eigenen Server ausblenden", "Hide server option"),
     "join_head":  ("Einem Raum beitreten", "Join a room"),
     "room_code":  ("Raumcode", "Room code"),
-    "invite_or_code": ("Einladungscode", "Invite code"),
-    "invite_hint": ("Fuege den Code ein, den der Host dir geschickt hat.",
-                    "Paste the code the host sent you."),
+    "invite_or_code": ("Einladungs-Link oder Code", "Invite link or code"),
+    "invite_hint": ("Fuege den Link (oder Code) ein, den der Host dir "
+                    "geschickt hat.",
+                    "Paste the link (or code) the host sent you."),
     "join_btn":   ("Beitreten", "Join"),
     "no_sel_pack": ("Erst im Menue einen Pack waehlen.",
                     "Pick a pack in the menu first."),
@@ -188,8 +202,27 @@ T = {
     "joining":    ("Trete bei (warte auf den Host) ...",
                    "Joining (waiting for the host) ..."),
     "lobby":      ("Lobby", "Lobby"),
-    "invite_label": ("Einladungscode (einfach weitergeben)",
-                     "Invite code (just share it)"),
+    "phones":     ("Handys", "Phones"),
+    "phone_title": ("Auf dem Handy mitspielen", "Play on a phone"),
+    "phone_hint": ("Mit der Handy-Kamera scannen - oeffnet sich im Browser, "
+                   "keine App noetig. Der Link funktioniert auch in der "
+                   "Desktop-App (Einladungsfeld).",
+                   "Scan with the phone camera - it opens in the browser, no "
+                   "app needed. The link also works in the desktop app's "
+                   "invite box."),
+    "qr_missing": ("QR-Code braucht das Paket 'qrcode' (Setup.bat). Link "
+                   "einfach so schicken:",
+                   "The QR code needs the 'qrcode' package (Setup.bat). Just "
+                   "send the link:"),
+    "phone_need_https": ("Achtung: Handys duerfen nur ueber https:// "
+                         "aufnehmen. 'Auf meinem Rechner hosten' liefert https.",
+                         "Note: phones can only record over https://. "
+                         "'Host on my machine' gives you https."),
+    "copy_link":  ("Link kopieren", "Copy link"),
+    "copy_old_code": ("Code fuer aeltere Desktop-Apps",
+                      "Code for older desktop apps"),
+    "invite_label": ("Einladungs-Link - fuer Handys und PCs",
+                     "Invite link - works on phones and PCs"),
     "copy":       ("Kopieren", "Copy"),
     "copied":     ("Kopiert!", "Copied!"),
     "share_code": ("Teile diesen Code mit den anderen",
@@ -2277,13 +2310,15 @@ class Game(tk.Tk):
                        font=("Segoe UI", 11))
 
         code = self.online_net.code
-        round_rect(cv, w / 2 - 190, 80, w / 2 + 190, 150, r=16, fill=PANEL,
+        round_rect(cv, w / 2 - 250, 80, w / 2 + 250, 150, r=16, fill=PANEL,
                    outline=ACC)
-        cv.create_text(w / 2 - 166, 108, anchor="w", text=code, fill=ACC_HI,
+        cv.create_text(w / 2 - 226, 108, anchor="w", text=code, fill=ACC_HI,
                        font=("Consolas", 30, "bold"))
-        self._btn(w / 2 + 44, 94, 132, 40, "📋  " + t("copy"),
+        self._btn(w / 2 + 6, 94, 116, 40, "📋  " + t("copy"),
                   self._copy_invite, "primary", font=("Segoe UI Semibold", 11))
-        cv.create_text(w / 2 - 166, 136, anchor="w", text=t("invite_label"),
+        self._btn(w / 2 + 130, 94, 104, 40, "📱  " + t("phones"),
+                  self._show_phone_link, "go", font=("Segoe UI Semibold", 11))
+        cv.create_text(w / 2 - 226, 136, anchor="w", text=t("invite_label"),
                        fill=DIM, font=("Segoe UI", 9))
 
         top = 178
@@ -2599,22 +2634,94 @@ class Game(tk.Tk):
             self.msgq.put(("lobby_upd", info))
         threading.Thread(target=work, daemon=True).start()
 
-    def _copy_invite(self):
-        """Legt den Einladungscode in die Zwischenablage."""
-        inv = self.online_invite
-        if not inv and self.online_net is not None:
-            inv = net.make_invite(self.online_public or self.online_net.base,
-                                  self.online_net.code)
-        if not inv:
-            return
+    def _web_link(self):
+        """Link fuer den Web-Spieler; funktioniert auf Handys UND (ab 1.5) im
+        Einladungsfeld der Desktop-App."""
+        if self.online_net is None:
+            return None
+        return net.web_link(self.online_public or self.online_net.base,
+                            self.online_net.code)
+
+    def _to_clipboard(self, text):
         try:
             self.clipboard_clear()
-            self.clipboard_append(inv)
+            self.clipboard_append(text)
         except Exception:
             pass
+
+    def _copy_invite(self):
+        """Legt den Einladungs-Link in die Zwischenablage."""
+        link = self._web_link()
+        if not link:
+            return
+        self._to_clipboard(link)
         self._lobby_note = t("copied")
         if self.screen == "lobby":
             self.build_lobby()
+
+    def _show_phone_link(self):
+        """Fenster mit QR-Code + Link, damit Handys per Kamera beitreten."""
+        link = self._web_link()
+        if not link:
+            return
+        top = tk.Toplevel(self)
+        top.title(t("phone_title"))
+        top.configure(bg=PANEL)
+        top.resizable(False, False)
+        top.transient(self)
+        tk.Label(top, text=t("phone_title"), bg=PANEL, fg=TXT,
+                 font=("Segoe UI Semibold", 15)).pack(padx=24, pady=(18, 4))
+        tk.Label(top, text=t("phone_hint"), bg=PANEL, fg=DIM,
+                 font=("Segoe UI", 10), wraplength=320,
+                 justify="center").pack(padx=24, pady=(0, 10))
+        mat = qr_matrix(link)
+        if mat:
+            size = 300
+            cell = max(2, size // len(mat))
+            side = cell * len(mat)
+            c = tk.Canvas(top, width=side, height=side, bg="#ffffff",
+                          highlightthickness=0)
+            for y, row in enumerate(mat):
+                for x, on in enumerate(row):
+                    if on:
+                        c.create_rectangle(x * cell, y * cell, (x + 1) * cell,
+                                           (y + 1) * cell, fill="#000000",
+                                           width=0)
+            c.pack(padx=24, pady=6)
+        else:
+            tk.Label(top, text=t("qr_missing"), bg=PANEL, fg=GOLD,
+                     font=("Segoe UI", 10), wraplength=320).pack(padx=24, pady=6)
+        e = tk.Entry(top, bg=PANEL_HI, fg=TXT, relief="flat",
+                     font=("Consolas", 10), readonlybackground=PANEL_HI,
+                     insertbackground=TXT, justify="center")
+        e.insert(0, link)
+        e.configure(state="readonly")
+        e.pack(fill="x", padx=24, pady=(8, 4), ipady=6)
+        if not link.lower().startswith("https://") and \
+                "://localhost" not in link and "://127.0.0.1" not in link:
+            tk.Label(top, text=t("phone_need_https"), bg=PANEL, fg=GOLD,
+                     font=("Segoe UI", 9), wraplength=320).pack(padx=24)
+        row = tk.Frame(top, bg=PANEL)
+        row.pack(fill="x", padx=24, pady=(8, 18))
+
+        def cp_link():
+            self._to_clipboard(link)
+            b1.configure(text=t("copied"))
+
+        def cp_code():
+            self._to_clipboard(net.make_invite(
+                self.online_public or self.online_net.base,
+                self.online_net.code))
+            b2.configure(text=t("copied"))
+        b1 = tk.Button(row, text=t("copy_link"), command=cp_link, bg=ACC,
+                       fg="#ffffff", relief="flat", font=("Segoe UI Semibold", 10),
+                       activebackground=ACC_HI, padx=10, pady=6)
+        b1.pack(side="left", expand=True, fill="x", padx=(0, 6))
+        b2 = tk.Button(row, text=t("copy_old_code"), command=cp_code,
+                       bg=PANEL_HI, fg=TXT, relief="flat",
+                       font=("Segoe UI", 9), activebackground=EDGE, padx=10,
+                       pady=6)
+        b2.pack(side="left", expand=True, fill="x")
 
     def _teardown_host_server(self):
         """Stoppt (falls dieser Rechner hostet) Tunnel und lokalen Relay."""

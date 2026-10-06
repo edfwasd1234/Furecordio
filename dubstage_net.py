@@ -22,6 +22,7 @@ import ssl
 import zipfile
 import urllib.error
 import urllib.request
+from urllib.parse import quote, urlparse
 
 TIMEOUT = 30
 UA = "DubStage-Client"
@@ -38,10 +39,32 @@ def make_invite(base_url, code):
     return INVITE_PREFIX + body
 
 
+def web_link(base_url, code):
+    """Link fuer den Web-Spieler (Handy): https://host/r/CODE."""
+    return "%s/r/%s" % ((base_url or "").rstrip("/"), (code or "").upper())
+
+
+def _parse_web_link(t):
+    """https://host/r/CODE -> (https://host, CODE) oder None."""
+    if not t.lower().startswith(("http://", "https://")):
+        return None
+    u = urlparse(t)
+    parts = [p for p in u.path.split("/") if p]
+    if len(parts) >= 2 and parts[-2] == "r" and parts[-1].isalnum():
+        prefix = "/".join(parts[:-2])
+        base = "%s://%s%s" % (u.scheme, u.netloc,
+                              ("/" + prefix) if prefix else "")
+        return base, parts[-1].upper()
+    return None
+
+
 def parse_invite(text):
-    """Zerlegt einen Einladungscode -> (base_url, code) oder None, wenn der
-    Text kein Einladungscode ist (dann ist es wohl ein blanker Raumcode)."""
+    """Zerlegt einen Einladungscode oder Web-Link -> (base_url, code) oder
+    None (dann ist es wohl ein blanker Raumcode)."""
     t = (text or "").strip()
+    web = _parse_web_link(t)
+    if web:
+        return web
     if len(t) <= len(INVITE_PREFIX) or t[:len(INVITE_PREFIX)].upper() != INVITE_PREFIX:
         return None
     body = t[len(INVITE_PREFIX):]
@@ -187,7 +210,8 @@ class Session(object):
         return bool(self.host_token)
 
     def _room(self, *parts):
-        return "/".join([self.base, "rooms", self.code] + list(parts))
+        return "/".join([self.base, "rooms", self.code]
+                        + [quote(p, safe="") for p in parts])
 
     # -- Zustand ----------------------------------------------------------
     def state(self):

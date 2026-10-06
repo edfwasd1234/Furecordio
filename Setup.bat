@@ -36,7 +36,7 @@ echo.
 rem ---------------------------------------------------------- Pakete
 echo [2/4] Python-Pakete installieren ^(numpy, yt-dlp, pillow, sounddevice^) ...
 %PY% -m pip install --upgrade pip --quiet
-%PY% -m pip install --upgrade numpy yt-dlp pillow sounddevice || (
+%PY% -m pip install --upgrade numpy yt-dlp pillow sounddevice qrcode || (
   echo [!] Installation fehlgeschlagen. Internet pruefen.
   pause & exit /b 1
 )

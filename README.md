@@ -25,6 +25,10 @@ In DubStage → **Play online**, pick your pack and press **🚀 Host on my mach
 
 You get an **invite code**. Hit **📋 Copy**, send it to your friends, and they paste it into **Play online → Invite code → Join**. That one code carries the address *and* the room — players never type a server. Players on other networks can take up to a minute on their first connect while DNS catches up; DubStage keeps retrying for them automatically. The room lives only while you (the host) keep DubStage open.
 
+### Friends on phones
+
+No install needed on a phone. In the lobby, press **📱 Phones** and let them scan the QR code (or send the link from **Copy**). It opens in the phone's browser: they type a name, tap a character, and record their lines with a 3-2-1 countdown over the video. Their takes go to your PC like any desktop player's, and show up in the final scene when you assemble. Phones need the `https://` link that **Host on my machine** gives you; browsers only allow the microphone on secure pages. Headphones help if they turn on the music while recording.
+
 ### Or run a shared/hosted server
 
 Prefer an always-on room that does not depend on one person's PC? Deploy the same standard-library relay **free in one click**:
